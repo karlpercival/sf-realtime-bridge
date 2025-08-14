@@ -195,69 +195,78 @@ try {
   openaiWs.on("close", () => { openaiReady = false; });
 
   // Twilio -> relay caller audio to OpenAI
-  twilioWs.on("message", (msg) => {
-    let data;
-    try { data = JSON.parse(msg.toString()); } catch { return; }
+// ---- Twilio -> audio frames (with debug logging of first few events) ----
+let debugCount = 0;
 
-    switch (data.event) {
-case "start":
-  streamSid = data.start.streamSid;
-  console.log("Twilio stream started:", streamSid);
+twilioWs.on("message", (msg) => {
+  const txt = msg.toString();
+  let data;
+  try { data = JSON.parse(txt); }
+  catch { console.log("Twilio non-JSON:", txt.slice(0,120)); return; }
 
-  // --- TEST TONE: 1 second of 1 kHz so we can verify outbound audio path ---
-  try {
-    const frames = 50;                  // 50 * 20ms = 1 second
-    const samplesPerFrame = 160;        // 20ms @ 8kHz
-    const totalSamples = frames * samplesPerFrame;
-
-    // Build a 1 kHz sine tone at 8 kHz, amplitude ~12k
-    const tonePcm = new Int16Array(totalSamples);
-    for (let i = 0; i < totalSamples; i++) {
-      const s = Math.sin(2 * Math.PI * 1000 * (i / 8000));
-      tonePcm[i] = Math.round(s * 12000);
-    }
-
-    // Encode to μ-law and enqueue as 20ms frames
-    const toneUlaw = pcm16ToMuLaw(tonePcm);
-    for (let i = 0; i + samplesPerFrame <= toneUlaw.length; i += samplesPerFrame) {
-      ulawQueue.push(toneUlaw.subarray(i, i + samplesPerFrame));
-    }
-    startPacer(); // ensure the 20ms sender is running
-  } catch (e) {
-    console.error("Test tone error:", e);
+  // Log the first few non-media events so we can see the real event names/payloads
+  if (debugCount < 5 && data.event !== "media") {
+    console.log("Twilio event:", data.event, JSON.stringify(data).slice(0,300));
+    debugCount++;
   }
-  // -------------------------------------------------------------------------
 
-  break;
+  switch (data.event) {
+    case "start":
+      streamSid = data.start?.streamSid || data.streamSid || null;
+      console.log("Twilio stream started:", streamSid);
 
+      // --- TEST TONE: 1 second of 1 kHz so we can verify outbound audio path ---
+      try {
+        const frames = 50;                  // 50 * 20ms = 1 second
+        const samplesPerFrame = 160;        // 20ms @ 8kHz
+        const totalSamples = frames * samplesPerFrame;
 
-      case "media":
-        if (!openaiReady) break;
-        try {
-          // Twilio sends base64 μ-law @ 8 kHz
-          const ulaw = b64ToU8(data.media.payload);
-          const pcm8k = muLawDecodeToPcm16(ulaw);
-          const pcm16k = upsample8kTo16k(pcm8k);
-          const b64pcm16 = i16ToB64(pcm16k);
-          openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-          // server VAD will handle turn-taking and trigger responses
-        } catch (e) {
-          console.error("Decode/forward error:", e);
+        // Build a 1 kHz sine tone at 8 kHz, amplitude ~12k
+        const tonePcm = new Int16Array(totalSamples);
+        for (let i = 0; i < totalSamples; i++) {
+          const s = Math.sin(2 * Math.PI * 1000 * (i / 8000));
+          tonePcm[i] = Math.round(s * 12000);
         }
-        break;
 
-      case "stop":
-        console.log("Twilio stream stopped");
-        stopPacer();
-        try { openaiWs.close(); } catch {}
-        try { twilioWs.close(); } catch {}
-        break;
+        // Encode to μ-law and enqueue as 20ms frames
+        const toneUlaw = pcm16ToMuLaw(tonePcm);
+        for (let i = 0; i + samplesPerFrame <= toneUlaw.length; i += samplesPerFrame) {
+          ulawQueue.push(toneUlaw.subarray(i, i + samplesPerFrame));
+        }
+        startPacer(); // ensure the 20ms sender is running
+      } catch (e) {
+        console.error("Test tone error:", e);
+      }
+      // -------------------------------------------------------------------------
+      break;
 
-      default:
-        // ignore mark/clear/dtmf for now
-        break;
-    }
-  });
+    case "media":
+      if (!openaiReady) break;
+      try {
+        // Twilio sends base64 μ-law @ 8 kHz
+        const ulaw = b64ToU8(data.media.payload);
+        const pcm8k = muLawDecodeToPcm16(ulaw);
+        const pcm16k = upsample8kTo16k(pcm8k);
+        const b64pcm16 = i16ToB64(pcm16k);
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
+      } catch (e) {
+        console.error("Decode/forward error:", e);
+      }
+      break;
+
+    case "stop":
+      console.log("Twilio stream stopped");
+      stopPacer();
+      try { openaiWs.close(); } catch {}
+      try { twilioWs.close(); } catch {}
+      break;
+
+    default:
+      // Keep logging unexpected events so we can adapt if names differ
+      console.log("Twilio unhandled event:", data.event);
+      break;
+  }
+});
 
   twilioWs.on("close", () => {
     stopPacer();
