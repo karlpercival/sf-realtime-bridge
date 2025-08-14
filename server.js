@@ -51,13 +51,13 @@ wss.on("connection", (twilioWs) => {
   const pacer = setInterval(() => {
     if (!streamSid || queue.length === 0 || twilioWs.readyState !== twilioWs.OPEN) return;
     const frame = queue.shift(); // Uint8Array of 160 bytes (20ms @ 8kHz)
-    twilioWs.send(JSON.stringify({
-      event: "media",
-      streamSid,
-       track: "outbound",                 // ← required for audio back to caller
-      media: { payload: u8ToB64(frame) }
-    }));
-  }, 20);
+twilioWs.send(JSON.stringify({
+  event: "media",
+  streamSid,
+  media: { payload: u8ToB64(frame) }
+}));
+
+  }, 20); 
 
   twilioWs.on("message", (msg) => {
     let data;
