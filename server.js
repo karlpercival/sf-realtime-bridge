@@ -102,34 +102,41 @@ wss.on("connection", async (twilioWs) => {
       };
       const client = new WebSocket(OPENAI_WS_URL, { headers });
 
-      client.on("open", () => {
-        // Configure session: British English + alloy voice + server VAD
-        const sessionUpdate = {
-          type: "session.update",
-          session: {
-            instructions:
-              "You are the SmartFlows phone agent. Keep replies to 1–2 sentences, friendly, British English.",
-            voice: "alloy",
-            modalities: ["audio", "text"],
-            turn_detection: {
-              type: "server_vad",
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 200,
-              create_response: true,
-              interrupt_response: true
-            },
-            input_audio_format: { type: "pcm16", sample_rate_hz: 16000 },
-            output_audio_format: { type: "pcm16", sample_rate_hz: 24000 }
-          }
-        };
-        client.send(JSON.stringify(sessionUpdate));
-        resolve(client);
-      });
+client.on("open", () => {
+  // Configure session: British English + alloy voice + server VAD
+  const sessionUpdate = {
+    type: "session.update",
+    session: {
+      instructions:
+        "You are the SmartFlows phone agent. Keep replies to 1–2 sentences, friendly, British English.",
+      voice: "alloy",
+      modalities: ["audio", "text"],
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 200,
+        create_response: true,
+        interrupt_response: true
+      },
+      input_audio_format: { type: "pcm16", sample_rate_hz: 16000 },
+      output_audio_format: { type: "pcm16", sample_rate_hz: 24000 }
+    }
+  };
+  client.send(JSON.stringify(sessionUpdate));
 
-      client.on("error", (e) => reject(e));
-      client.on("close", () => {});
-    });
+  // Immediate greeting so the caller hears something straightaway
+  client.send(JSON.stringify({
+    type: "response.create",
+    response: {
+      modalities: ["audio"],
+      instructions: "Hi, you’re speaking to the SmartFlows assistant. How can I help today?"
+    }
+  }));
+
+  resolve(client);
+});
+
   }
 
   try {
