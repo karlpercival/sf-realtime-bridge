@@ -104,24 +104,27 @@ wss.on("connection", async (twilioWs) => {
 
     openaiWs.on("open", () => {
       // Session: British English, alloy, server VAD, audio I/O
-      openaiWs.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions: "You are the SmartFlows phone agent. Keep replies to 1–2 sentences, friendly, British English.",
-          voice: "alloy",
-          modalities: ["audio", "text"],
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
-            create_response: true,
-            interrupt_response: true
-          },
-          input_audio_format:  { type: "pcm16", sample_rate_hz: 16000 },
-          output_audio_format: { type: "pcm16", sample_rate_hz: 24000 }
-        }
-      }));
+openaiWs.send(JSON.stringify({
+  type: "session.update",
+  session: {
+    instructions:
+      "You are the SmartFlows phone agent. Always respond in British English only. Do not switch languages. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
+    voice: "alloy",
+    modalities: ["audio", "text"],
+    turn_detection: {
+      type: "server_vad",
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 200,
+      create_response: true,
+      interrupt_response: true
+    },
+    input_audio_format:  { type: "pcm16", sample_rate_hz: 16000 },
+    output_audio_format: { type: "pcm16", sample_rate_hz: 24000 },
+    input_audio_transcription: { language: "en" } // force English STT
+  }
+}));
+
 
       // Optional: first-utterance greeting
       openaiWs.send(JSON.stringify({
