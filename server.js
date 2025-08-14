@@ -54,6 +54,7 @@ wss.on("connection", (twilioWs) => {
     twilioWs.send(JSON.stringify({
       event: "media",
       streamSid,
+       track: "outbound",                 // ← required for audio back to caller
       media: { payload: u8ToB64(frame) }
     }));
   }, 20);
