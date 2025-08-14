@@ -264,12 +264,12 @@ wss.on("connection", async (twilioWs) => {
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
 
             // Every ~1s of speech, force a commit + response to keep things snappy
-            frames = (frames + 1) % 1000000;
-            if (frames % 50 === 0) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-              openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio"] } }));
-              console.log("Committed audio & requested response");
-            }
+frames = (frames + 1) % 1000000;
+if (frames % 60 === 0) {
+  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+  // no response.create here; server VAD (create_response:true) will handle replies
+}
+
           }
 
           // Echo caller UNTIL assistant starts talking, then stop echoing
