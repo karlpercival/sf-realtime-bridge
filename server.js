@@ -33,9 +33,12 @@ const MULAW_EXPAND = new Int16Array(256);
 })();
 function muLawDecodeToPcm16(u8) {
   const out = new Int16Array(u8.length);
-  for (let i = 0; i < u8.length; i++) out[i] = MULAW_EXPAND[i = u8[i]];
+  for (let i = 0; i < u8.length; i++) {
+    out[i] = MULAW_EXPAND[u8[i]];   // ← correct indexing (no assignment to i)
+  }
   return out;
 }
+
 function pcm16ToMuLaw(int16) {
   const BIAS = 0x84, CLIP = 32635;
   const out = new Uint8Array(int16.length);
