@@ -227,8 +227,20 @@ case "media": {
       const pcm8k  = muLawDecodeToPcm16(ulaw);
       const pcm16k = upsample8kTo16k(pcm8k);
       const b64pcm16 = i16ToB64(pcm16k);
+
+      // Append caller audio
       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-      // IMPORTANT: no commit/response.create here — server_vad will auto-create replies
+
+      // Every 50 frames (~1s), force a commit and ask for a response
+      globalThis._frames = (globalThis._frames || 0) + 1;
+      if (globalThis._frames % 50 === 0) {
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio"] }
+        }));
+        console.log("Committed audio & requested response");
+      }
     } else {
       // Fallback echo until OpenAI is ready
       queue.push(ulaw);
@@ -238,6 +250,7 @@ case "media": {
   }
   break;
 }
+
 
 
       case "stop": {
