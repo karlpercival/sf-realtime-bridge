@@ -225,10 +225,14 @@ wss.on("connection", async (twilioWs) => {
     try { data = JSON.parse(msg.toString()); } catch { return; }
 
     switch (data.event) {
-      case "start":
-        streamSid = data.start.streamSid;
-        console.log("Twilio stream started:", streamSid);
-        break;
+case "start":
+  streamSid = data.start.streamSid;
+  console.log("Twilio stream started:", streamSid);
+  // flush any greeting audio that arrived before streamSid was set
+  flushToTwilioMuLaw();
+  setTimeout(flushToTwilioMuLaw, 50); // tiny safety flush
+  break;
+
 
       case "media":
         if (!openaiReady) break;
