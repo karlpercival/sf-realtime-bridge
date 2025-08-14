@@ -46,18 +46,17 @@ wss.on("connection", (twilioWs) => {
   console.log("Twilio connected");
   let streamSid = null;
 
-  // 20ms frame pacer
-  const queue = [];
-  const pacer = setInterval(() => {
-    if (!streamSid || queue.length === 0 || twilioWs.readyState !== twilioWs.OPEN) return;
-    const frame = queue.shift(); // Uint8Array of 160 bytes (20ms @ 8kHz)
-twilioWs.send(JSON.stringify({
-  event: "media",
-  streamSid,
-  media: { payload: u8ToB64(frame) }
-}));
+// 20 ms pacer — send μ-law 8kHz frames back to the call
+const pacer = setInterval(() => {
+  if (!streamSid || queue.length === 0 || twilioWs.readyState !== twilioWs.OPEN) return;
+  const frame = queue.shift(); // Uint8Array of 160 bytes (20 ms @ 8 kHz)
+  twilioWs.send(JSON.stringify({
+    event: "media",
+    streamSid,
+    media: { payload: u8ToB64(frame) }  // ← no media.track here
+  }));
+}, 20);
 
-  }, 20); 
 
   twilioWs.on("message", (msg) => {
     let data;
