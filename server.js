@@ -197,27 +197,36 @@ wss.on("connection", async (twilioWs) => {
         break;
       }
 
-      case "media": {
-        try {
-          const ulaw = b64ToU8(data.media?.payload || "");
-          if (ulaw.length !== 160) break;
+case "media": {
+  try {
+    const ulaw = b64ToU8(data.media?.payload || "");
+    if (ulaw.length !== 160) break;
 
-          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-            // forward caller audio to OpenAI
-            const pcm8k = muLawDecodeToPcm16(ulaw);
-            const pcm16k = upsample8kTo16k(pcm8k);
-            const b64pcm16 = i16ToB64(pcm16k);
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-            // server VAD is enabled; it will create responses automatically
-          } else {
-            // fallback echo until OpenAI ready
-            queue.push(ulaw);
-          }
-        } catch (e) {
-          console.error("Media forward error:", e?.message || e);
-        }
-        break;
+    if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+      // 8 kHz μ-law -> 16 kHz PCM16
+      const pcm8k  = muLawDecodeToPcm16(ulaw);
+      const pcm16k = upsample8kTo16k(pcm8k);
+      const b64pcm16 = i16ToB64(pcm16k);
+
+      // Append caller audio to OpenAI input buffer
+      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
+
+      // Every ~1s of audio (50 * 20ms) commit & request a response
+      globalThis._frameCount = (globalThis._frameCount || 0) + 1;
+      if (globalThis._frameCount % 50 === 0) {
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio"] } }));
       }
+    } else {
+      // Fallback echo until OpenAI is ready
+      queue.push(ulaw);
+    }
+  } catch (e) {
+    console.error("Media forward error:", e?.message || e);
+  }
+  break;
+}
+
 
       case "stop": {
         console.log("Twilio stream stopped");
