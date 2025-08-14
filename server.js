@@ -298,8 +298,6 @@ wss.on("connection", async (twilioWs) => {
   });
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
-});
+}); // ← THIS is the final line of server.js; there should be NO extra "});" after it
 
-  twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
-});
 
