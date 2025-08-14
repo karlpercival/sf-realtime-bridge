@@ -1,24 +1,24 @@
-// server.js — Minimal Twilio <-> WS tone + echo (no OpenAI)
-// Env: none. Railway sets PORT. Twilio streams to wss://.../stream
+// server.js — Minimal Twilio <-> WS tone + echo (no OpenAI yet)
+// Purpose: prove outbound audio works. Twilio requires WS subprotocol "audio".
+// Env: none. Railway provides PORT. Twilio streams to wss://.../stream
 
 import express from "express";
-import { WebSocketServer } from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
+// ---------- tiny HTTP for health ----------
 const app = express();
 app.get("/healthz", (_, res) => res.status(200).send("ok"));
 const server = app.listen(process.env.PORT || 8080, () => {
   console.log("Bridge listening on", server.address().port);
 });
 
-const wss = new WebSocketServer({ server, path: "/stream" });
-
-// μ-law helpers
+// ---------- μ-law helpers ----------
 const MULAW_EXPAND = new Int16Array(256);
 (function () {
   for (let i = 0; i < 256; i++) {
     const mu = ~i & 0xff, sign = mu & 0x80, exp = (mu >> 4) & 0x07, man = mu & 0x0f;
     let sample = ((man << 4) + 0x08) << (exp + 3);
-    sample -= 0x84; // 132
+    sample -= 0x84; // bias 132
     MULAW_EXPAND[i] = sign ? -sample : sample;
   }
 })();
@@ -41,35 +41,55 @@ function pcm16ToMuLaw(int16) {
 const b64ToU8 = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
 const u8ToB64  = (u8)  => Buffer.from(u8).toString("base64");
 
-// WS
+// ---------- WebSocket endpoint (accept Twilio 'audio' subprotocol) ----------
+const wss = new WebSocketServer({
+  server,
+  path: "/stream",
+  handleProtocols: (protocols /*, req*/) => {
+    // Twilio offers ["audio"]; we must select it or the handshake fails (31921)
+    return protocols.includes("audio") ? "audio" : false;
+  }
+});
+
 wss.on("connection", (twilioWs) => {
-  console.log("Twilio connected");
+  console.log("Twilio connected; subprotocol:", twilioWs.protocol);
+
   let streamSid = null;
 
-// 20 ms pacer
-const pacer = setInterval(() => {
-  if (!streamSid || queue.length === 0 || twilioWs.readyState !== WebSocket.OPEN) return;
-  const frame = queue.shift();
-  twilioWs.send(JSON.stringify({
-    event: "media",
-    streamSid,
-    media: { payload: u8ToB64(frame) }   // no track field for <Connect><Stream>
-  }));
-}, 20);
+  // Outbound queue + 20ms pacer (160 samples @ 8kHz per frame)
+  const queue = [];
+  const pacer = setInterval(() => {
+    if (!streamSid || queue.length === 0 || twilioWs.readyState !== WebSocket.OPEN) return;
+    const frame = queue.shift(); // Uint8Array(160)
+    twilioWs.send(JSON.stringify({
+      event: "media",
+      streamSid,
+      media: { payload: u8ToB64(frame) }   // Twilio expects ONLY event, streamSid, media.payload
+    }));
+  }, 20);
 
-
+  let debugCount = 0;
   twilioWs.on("message", (msg) => {
+    const txt = msg.toString();
     let data;
-    try { data = JSON.parse(msg.toString()); } catch { return; }
+    try { data = JSON.parse(txt); } catch { console.log("non-JSON from Twilio:", txt.slice(0,120)); return; }
+
+    // Log first few control events
+    if (debugCount < 5 && data.event !== "media") {
+      console.log("Twilio event:", data.event, JSON.stringify(data).slice(0, 200));
+      debugCount++;
+    }
 
     switch (data.event) {
-      case "start":
+      case "start": {
         streamSid = data.start?.streamSid || data.streamSid || null;
         console.log("Twilio stream started:", streamSid);
 
-        // 1 second 1kHz test tone (so we know outbound audio works)
+        // --- 1s test tone (1 kHz) so we can verify outbound audio path ---
         try {
-          const frames = 50, samplesPerFrame = 160, total = frames * samplesPerFrame;
+          const frames = 50;                 // 50 * 20ms = 1s
+          const samplesPerFrame = 160;       // 20ms @ 8kHz
+          const total = frames * samplesPerFrame;
           const tonePcm = new Int16Array(total);
           for (let i = 0; i < total; i++) {
             const s = Math.sin(2 * Math.PI * 1000 * (i / 8000)); // 1kHz @ 8kHz
@@ -79,25 +99,29 @@ const pacer = setInterval(() => {
           for (let i = 0; i + samplesPerFrame <= toneU.length; i += samplesPerFrame) {
             queue.push(toneU.subarray(i, i + samplesPerFrame));
           }
+        } catch (e) { console.error("Tone error:", e); }
+        break;
+      }
+
+      case "media": {
+        // Echo caller audio back (payload is already μ-law 20ms)
+        try {
+          const ulaw = b64ToU8(data.media?.payload || "");
+          if (ulaw.length === 160) queue.push(ulaw);
         } catch (e) {
-          console.error("Tone error:", e);
+          console.error("Echo error:", e);
         }
         break;
+      }
 
-case "media": {
-  // Count incoming frames from Twilio (μ-law @ 8kHz, 20ms)
-  globalThis._frames = (globalThis._frames || 0) + 1;
-  if (globalThis._frames % 50 === 0) {
-    console.log("received media frames:", globalThis._frames);
-  }
-  // (no outbound audio yet)
-  break;
-}
-
-
-      case "stop":
+      case "stop": {
         console.log("Twilio stream stopped");
         try { twilioWs.close(); } catch {}
+        break;
+      }
+
+      default:
+        // dtmf/mark/clear, etc.
         break;
     }
   });
@@ -106,4 +130,9 @@ case "media": {
     console.log("Twilio WS closed");
     clearInterval(pacer);
   });
+
+  twilioWs.on("error", (e) => {
+    console.error("Twilio WS error:", e?.message || e);
+  });
 });
+
