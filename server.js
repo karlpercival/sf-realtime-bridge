@@ -141,13 +141,14 @@ wss.on("connection", async (twilioWs) => {
   }
   function stopPacer() { if (txTimer) { clearInterval(txTimer); txTimer = null; } }
 
-  try {
-    openaiWs = await connectOpenAI();
-    openaiReady = true;
-  } catch {
-    try { twilioWs.close(1011, "OpenAI unavailable"); } catch {}
-    return;
-  }
+try {
+  openaiWs = await connectOpenAI();
+  openaiReady = true;
+} catch (e) {
+  console.error("OpenAI connect failed (continuing without it):", e?.message || e);
+  openaiReady = false; // keep Twilio stream alive so we can test outbound audio
+}
+
 
   // OpenAI -> build μ-law frames and enqueue (with proper Int16 view)
   openaiWs.on("message", (data) => {
