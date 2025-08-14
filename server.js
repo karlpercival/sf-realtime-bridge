@@ -106,27 +106,40 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-    openaiWs.on("open", () => {
-      openaiWs.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions:
-            "You are the SmartFlows phone agent. Always respond in British English only. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
-          voice: "alloy",
-          modalities: ["audio", "text"],
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
-            create_response: true,
-            interrupt_response: true
-          },
-          input_audio_format:  { type: "pcm16", sample_rate_hz: 16000 },
-          output_audio_format: { type: "pcm16", sample_rate_hz: 24000 },
-          input_audio_transcription: { language: "en" }
-        }
-      }));
+openaiWs.on("open", () => {
+  // Force British English input + output
+  openaiWs.send(JSON.stringify({
+    type: "session.update",
+    session: {
+      instructions:
+        "You are the SmartFlows phone agent. ALWAYS respond in British English only. Never switch languages. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
+      voice: "alloy",
+      modalities: ["audio", "text"],
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 200,
+        create_response: true,
+        interrupt_response: true
+      },
+      input_audio_format:  { type: "pcm16", sample_rate_hz: 16000 },
+      output_audio_format: { type: "pcm16", sample_rate_hz: 24000 },
+      // IMPORTANT: force STT to English
+      input_audio_transcription: { language: "en" }
+    }
+  }));
+
+  // Optional greeting in English so the first voice you hear is correct
+  openaiWs.send(JSON.stringify({
+    type: "response.create",
+    response: {
+      modalities: ["audio"],
+      instructions: "Hello, you’re speaking to the SmartFlows assistant. How can I help today?"
+    }
+  }));
+});
+
 
       // Optional greeting so line feels responsive
       openaiWs.send(JSON.stringify({
