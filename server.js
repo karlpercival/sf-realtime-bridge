@@ -85,15 +85,16 @@ wss.on("connection", (twilioWs) => {
         }
         break;
 
-      case "media":
-        // Echo back caller audio (payload is already μ-law 20ms)
-        try {
-          const ulaw = b64ToU8(data.media.payload);
-          if (ulaw.length === 160) queue.push(ulaw);
-        } catch (e) {
-          console.error("Echo error:", e);
-        }
-        break;
+case "media": {
+  // Count incoming frames from Twilio (μ-law @ 8kHz, 20ms)
+  globalThis._frames = (globalThis._frames || 0) + 1;
+  if (globalThis._frames % 50 === 0) {
+    console.log("received media frames:", globalThis._frames);
+  }
+  // (no outbound audio yet)
+  break;
+}
+
 
       case "stop":
         console.log("Twilio stream stopped");
