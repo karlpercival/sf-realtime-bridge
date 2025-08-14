@@ -94,7 +94,26 @@ wss.on("connection", async (twilioWs) => {
   // ---- OpenAI Realtime ----
   let openaiWs = null;
   let openaiReady = false;
-  let assistantSpeaking = false; // flips true on first audio delta
+
+  // >>> Step 1 addition: assistant speaking flag + helpers <<<
+  let assistantSpeaking = false;
+  let speakingResetTimer = null;
+  const markAssistantSpeaking = () => {
+    if (!assistantSpeaking) console.log("Assistant started speaking");
+    assistantSpeaking = true;
+    if (speakingResetTimer) clearTimeout(speakingResetTimer);
+    // Safety timeout in case we miss a completion event
+    speakingResetTimer = setTimeout(() => {
+      assistantSpeaking = false;
+      console.log("Assistant speaking auto-cleared (timeout)");
+    }, 800);
+  };
+  const clearAssistantSpeaking = () => {
+    if (assistantSpeaking) console.log("Assistant finished speaking");
+    assistantSpeaking = false;
+    if (speakingResetTimer) { clearTimeout(speakingResetTimer); speakingResetTimer = null; }
+  };
+  // >>> end Step 1 addition <<<
 
   try {
     openaiWs = new WebSocket(OPENAI_WS_URL, {
@@ -134,52 +153,64 @@ wss.on("connection", async (twilioWs) => {
       console.log("OpenAI connected");
     });
 
-// OpenAI -> audio deltas -> μ-law frames -> queue (with debug logging)
-let oaDebug = 0;
-openaiWs.on("message", (buf) => {
-  try {
-    const txt = buf.toString();
-    const msg = JSON.parse(txt);
+    // OpenAI -> audio deltas -> μ-law frames -> queue (with debug logging)
+    let oaDebug = 0;
+    openaiWs.on("message", (buf) => {
+      try {
+        const txt = buf.toString();
+        const msg = JSON.parse(txt);
 
-    // Log the first few event types so we know what the API is sending
-    if (oaDebug < 10) {
-      console.log("OpenAI event:", msg.type);
-      oaDebug++;
-    }
+        // Log the first few event types so we know what the API is sending
+        if (oaDebug < 10) {
+          console.log("OpenAI event:", msg.type);
+          oaDebug++;
+        }
 
-    // Current name
-    if (msg.type === "response.output_audio.delta" && msg.delta) {
-      const raw = Buffer.from(msg.delta, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
+        // Current name
+        if (msg.type === "response.output_audio.delta" && msg.delta) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.delta, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
-    // Fallback names
-    if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
-      const raw = Buffer.from(msg.delta || msg.audio, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
+        // Fallback names
+        if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.delta || msg.audio, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
-    if (msg.type === "output_audio.delta" && msg.audio) {
-      const raw = Buffer.from(msg.audio, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
-  } catch {
-    // ignore non-JSON frames
-  }
-});
+        if (msg.type === "output_audio.delta" && msg.audio) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.audio, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
+        // When a response ends, allow echo again
+        if (
+          msg.type === "response.completed" ||
+          msg.type === "response.finished"  ||
+          msg.type === "response.output_audio.done" ||
+          msg.type === "response.done"
+        ) {
+          clearAssistantSpeaking();
+        }
+      } catch {
+        // ignore non-JSON frames
+      }
+    });
 
     openaiWs.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
     openaiWs.on("close", (c, r) => { console.log("OpenAI WS closed:", c, r?.toString?.()); openaiReady = false; });
@@ -265,6 +296,9 @@ openaiWs.on("message", (buf) => {
     clearInterval(pacer);
     try { openaiWs?.close(); } catch {}
   });
+
+  twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
+});
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 });
