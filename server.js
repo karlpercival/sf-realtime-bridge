@@ -134,44 +134,52 @@ wss.on("connection", async (twilioWs) => {
       console.log("OpenAI connected");
     });
 
-    // OpenAI -> audio deltas -> μ-law frames -> queue
-    openaiWs.on("message", (buf) => {
-      try {
-        const msg = JSON.parse(buf.toString());
+// OpenAI -> audio deltas -> μ-law frames -> queue (with debug logging)
+let oaDebug = 0;
+openaiWs.on("message", (buf) => {
+  try {
+    const txt = buf.toString();
+    const msg = JSON.parse(txt);
 
-        // Current event name
-        if (msg.type === "response.output_audio.delta" && msg.delta) {
-          assistantSpeaking = true;
-          const raw = Buffer.from(msg.delta, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
-        // Fallback event names
-        if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
-          assistantSpeaking = true;
-          const raw = Buffer.from(msg.delta || msg.audio, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
-        if (msg.type === "output_audio.delta" && msg.audio) {
-          assistantSpeaking = true;
-          const raw = Buffer.from(msg.audio, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
-      } catch {
-        // ignore non-JSON frames
-      }
-    });
+    // Log the first few event types so we know what the API is sending
+    if (oaDebug < 10) {
+      console.log("OpenAI event:", msg.type);
+      oaDebug++;
+    }
+
+    // Current name
+    if (msg.type === "response.output_audio.delta" && msg.delta) {
+      const raw = Buffer.from(msg.delta, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
+
+    // Fallback names
+    if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
+      const raw = Buffer.from(msg.delta || msg.audio, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
+
+    if (msg.type === "output_audio.delta" && msg.audio) {
+      const raw = Buffer.from(msg.audio, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
+  } catch {
+    // ignore non-JSON frames
+  }
+});
+
 
     openaiWs.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
     openaiWs.on("close", (c, r) => { console.log("OpenAI WS closed:", c, r?.toString?.()); openaiReady = false; });
