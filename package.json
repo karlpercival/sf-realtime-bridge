@@ -1,0 +1,13 @@
+{
+  "name": "sf-realtime-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
