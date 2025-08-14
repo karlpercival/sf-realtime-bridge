@@ -199,11 +199,36 @@ wss.on("connection", async (twilioWs) => {
     try { data = JSON.parse(msg.toString()); } catch { return; }
 
     switch (data.event) {
-      case "start":
-        streamSid = data.start.streamSid;
-        console.log("Twilio stream started:", streamSid);
-        startPacer(); // begin pacing if we already have greeting frames queued
-        break;
+case "start":
+  streamSid = data.start.streamSid;
+  console.log("Twilio stream started:", streamSid);
+
+  // --- TEST TONE: 1 second of 1 kHz so we can verify outbound audio path ---
+  try {
+    const frames = 50;                  // 50 * 20ms = 1 second
+    const samplesPerFrame = 160;        // 20ms @ 8kHz
+    const totalSamples = frames * samplesPerFrame;
+
+    // Build a 1 kHz sine tone at 8 kHz, amplitude ~12k
+    const tonePcm = new Int16Array(totalSamples);
+    for (let i = 0; i < totalSamples; i++) {
+      const s = Math.sin(2 * Math.PI * 1000 * (i / 8000));
+      tonePcm[i] = Math.round(s * 12000);
+    }
+
+    // Encode to μ-law and enqueue as 20ms frames
+    const toneUlaw = pcm16ToMuLaw(tonePcm);
+    for (let i = 0; i + samplesPerFrame <= toneUlaw.length; i += samplesPerFrame) {
+      ulawQueue.push(toneUlaw.subarray(i, i + samplesPerFrame));
+    }
+    startPacer(); // ensure the 20ms sender is running
+  } catch (e) {
+    console.error("Test tone error:", e);
+  }
+  // -------------------------------------------------------------------------
+
+  break;
+
 
       case "media":
         if (!openaiReady) break;
