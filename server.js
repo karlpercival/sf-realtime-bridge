@@ -245,6 +245,14 @@ wss.on("connection", async (twilioWs) => {
   // ---- Twilio -> (OpenAI + conditional echo) ----
   let debugCount = 0;
   let frames = 0;
+  
+// Fallback VAD (commit-on-silence)
+let appendedMs = 0;            // how much audio we've sent since last commit
+let silenceCount = 0;          // consecutive 20ms frames below threshold
+const SILENCE_FRAMES = 20;     // 20 * 20ms = ~400ms of silence
+const SILENCE_THRESH = 600;    // simple peak threshold on 16-bit PCM
+
+  
 
   twilioWs.on("message", (msg) => {
     const txt = msg.toString();
@@ -282,28 +290,53 @@ wss.on("connection", async (twilioWs) => {
         break;
       }
 
-      case "media": {
-        try {
-          const ulaw = b64ToU8(data.media?.payload || "");
-          if (ulaw.length !== 160) break;
+case "media": {
+  try {
+    const ulaw = b64ToU8(data.media?.payload || "");
+    if (ulaw.length !== 160) break;
 
-          // Always feed OpenAI if connected
-          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-            const pcm8k  = muLawDecodeToPcm16(ulaw);
-            const pcm16k = upsample8kTo16k(pcm8k);
-            const b64pcm16 = i16ToB64(pcm16k);
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-          }
+    // Always feed OpenAI if connected
+    if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+      const pcm8k  = muLawDecodeToPcm16(ulaw);
+      const pcm16k = upsample8kTo16k(pcm8k);
 
-          // Echo caller UNTIL assistant starts talking
-          if (!assistantSpeaking) {
-            queue.push(ulaw);
-          }
-        } catch (e) {
-          console.error("Media forward error:", e?.message || e);
-        }
-        break;
+      // Append caller audio to OpenAI
+      const b64pcm16 = i16ToB64(pcm16k);
+      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
+      appendedMs += 20; // each Twilio media frame is 20ms
+
+      // Very light energy check (peak) for silence detection
+      let peak = 0;
+      for (let i = 0; i < pcm16k.length; i += 16) { // sample ~every 1ms
+        const v = pcm16k[i] < 0 ? -pcm16k[i] : pcm16k[i];
+        if (v > peak) peak = v;
       }
+      if (peak < SILENCE_THRESH) {
+        silenceCount++;
+      } else {
+        silenceCount = 0;
+      }
+
+      // If we've got ≥200ms of audio and then ~400ms of silence, commit + request a reply
+      if (appendedMs >= 200 && silenceCount >= SILENCE_FRAMES) {
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+        appendedMs = 0;
+        silenceCount = 0;
+        console.log("Committed on silence & requested response");
+      }
+    }
+
+    // Echo caller UNTIL assistant starts talking
+    if (!assistantSpeaking) {
+      queue.push(ulaw);
+    }
+  } catch (e) {
+    console.error("Media forward error:", e?.message || e);
+  }
+  break;
+}
+
 
       case "stop": {
         console.log("Twilio stream stopped");
