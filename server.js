@@ -297,66 +297,29 @@ let responseInProgress = false;   // true between response.created and response.
         break;
       }
 
-     case "media": {
+    case "media": {
   try {
     const ulaw = b64ToU8(data.media?.payload || "");
-    if (ulaw.length !== 160) break;
+    if (ulaw.length !== 160) break; // 20ms @ 8kHz
 
     // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
     if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
       const pcm8k  = muLawDecodeToPcm16(ulaw);
       const pcm16k = upsample8kTo16k(pcm8k);
-
-      // Append caller audio (20 ms per frame)
+      // Append audio; DO NOT commit – server VAD (create_response:true) will trigger replies
       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
-      appendedMs += 20;
-
-      // Simple energy check for speech vs silence
-      let peak = 0;
-      for (let i = 0; i < pcm16k.length; i += 16) { // sample ~every 1ms
-        const v = pcm16k[i] < 0 ? -pcm16k[i] : pcm16k[i];
-        if (v > peak) peak = v;
-      }
-
-      if (peak >= SILENCE_THRESH) {
-        heardSpeech = true;
-        speechFrames++;        // count speech frames
-        silenceCount = 0;      // reset silence run
-      } else {
-        silenceCount++;
-      }
-
-      // Commit only if:
-      // - we heard real speech since the last commit,
-      // - we've accumulated enough speech frames (>= 12 ≈ 240ms of voiced audio),
-      // - we then observe ~500ms of silence (end of caller turn),
-      // - and there is NO response already in progress.
-      if (heardSpeech && speechFrames >= 12 && !responseInProgress && silenceCount >= SILENCE_FRAMES) {
-        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
-        console.log("Committed on silence & requested response (speechFrames=%d)", speechFrames);
-        // reset turn trackers
-        appendedMs = 0;
-        silenceCount = 0;
-        heardSpeech = false;
-        speechFrames = 0;
-      }
-    } else {
-      // While assistant speaks or OpenAI not ready, never accumulate user buffer
-      appendedMs = 0;
-      silenceCount = 0;
-      heardSpeech = false;
-      speechFrames = 0;
     }
 
     // Echo caller UNTIL assistant starts talking
-    if (!assistantSpeaking) queue.push(ulaw);
-
+    if (!assistantSpeaking) {
+      queue.push(ulaw);
+    }
   } catch (e) {
     console.error("Media forward error:", e?.message || e);
   }
   break;
 }
+
 
 
       case "stop": {
