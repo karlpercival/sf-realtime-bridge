@@ -98,15 +98,22 @@ wss.on("connection", async (twilioWs) => {
   // Controls echo
   let assistantSpeaking = false;
   let speakingResetTimer = null;
-  const markAssistantSpeaking = () => {
-    if (!assistantSpeaking) console.log("Assistant started speaking");
-    assistantSpeaking = true;
-    if (speakingResetTimer) clearTimeout(speakingResetTimer);
-    speakingResetTimer = setTimeout(() => {
-      assistantSpeaking = false;
-      console.log("Assistant speaking auto-cleared (timeout)");
-    }, 800);
-  };
+const markAssistantSpeaking = () => {
+  if (!assistantSpeaking) console.log("Assistant started speaking");
+  assistantSpeaking = true;
+  if (speakingResetTimer) clearTimeout(speakingResetTimer);
+
+  // Reset VAD counters so we never commit while the assistant is talking
+  appendedMs = 0;
+  silenceCount = 0;
+  heardSpeech = false;
+
+  speakingResetTimer = setTimeout(() => {
+    assistantSpeaking = false;
+    console.log("Assistant speaking auto-cleared (timeout)");
+  }, 800);
+};
+
   const clearAssistantSpeaking = () => {
     if (assistantSpeaking) console.log("Assistant finished speaking");
     assistantSpeaking = false;
@@ -251,6 +258,8 @@ let appendedMs = 0;            // how much audio we've sent since last commit
 let silenceCount = 0;          // consecutive 20ms frames below threshold
 const SILENCE_FRAMES = 20;     // 20 * 20ms = ~400ms of silence
 const SILENCE_THRESH = 600;    // simple peak threshold on 16-bit PCM
+let heardSpeech = false;       // have we detected any speech since last commit?
+  
 
   
 
