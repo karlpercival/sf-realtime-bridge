@@ -167,7 +167,6 @@ openaiWs.on("message", (buf) => {
       oaDebug++;
     }
 
-    // Primary audio delta name
     if (msg.type === "response.output_audio.delta" && msg.delta) {
       markAssistantSpeaking();
       const raw = Buffer.from(msg.delta, "base64");
@@ -178,7 +177,6 @@ openaiWs.on("message", (buf) => {
       return;
     }
 
-    // Fallback names we’ve seen on some accounts
     if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
       markAssistantSpeaking();
       const raw = Buffer.from(msg.delta || msg.audio, "base64");
@@ -199,10 +197,8 @@ openaiWs.on("message", (buf) => {
       return;
     }
 
-    // Helpful visibility: if the model is only sending text deltas
+    // If model is only sending text
     if (msg.type === "response.output_text.delta" && msg.delta) {
-      // No audio in this event; just log that we’re receiving text
-      // (If we keep seeing only text, we’ll add a TTS fallback next step)
       return;
     }
 
@@ -227,6 +223,7 @@ openaiWs.on("message", (buf) => {
     console.log("OpenAI message handler error:", e?.message || e);
   }
 });
+
 
 
   // ---- Twilio -> (OpenAI + conditional echo) ----
