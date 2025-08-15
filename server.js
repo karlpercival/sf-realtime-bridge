@@ -309,30 +309,36 @@ case "media": {
       const pcm8k  = muLawDecodeToPcm16(ulaw);
       const pcm16k = upsample8kTo16k(pcm8k);
 
-      // Append caller audio to OpenAI
+      // Append caller audio to OpenAI (20 ms per Twilio frame)
       const b64pcm16 = i16ToB64(pcm16k);
       openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-      appendedMs += 20; // each Twilio media frame is 20ms
+      appendedMs += 20;
 
-      // Very light energy check (peak) for silence detection
+      // Simple energy check to detect speech vs. silence
       let peak = 0;
       for (let i = 0; i < pcm16k.length; i += 16) { // sample ~every 1ms
         const v = pcm16k[i] < 0 ? -pcm16k[i] : pcm16k[i];
         if (v > peak) peak = v;
       }
-      if (peak < SILENCE_THRESH) {
-        silenceCount++;
+      if (peak >= SILENCE_THRESH) {
+        heardSpeech = true;     // mark that we heard *some* speech since last commit
+        silenceCount = 0;       // reset silence run
       } else {
-        silenceCount = 0;
+        silenceCount++;
       }
 
-      // If we've got ≥200ms of audio and then ~400ms of silence, commit + request a reply
-      if (appendedMs >= 200 && silenceCount >= SILENCE_FRAMES) {
+      // Only trigger when:
+      // - we heard *some* speech since last commit (avoid pure-silence commits),
+      // - we've had ~400 ms of silence (end of user turn),
+      // - the assistant is NOT currently speaking (avoid model “talking to itself”).
+      if (heardSpeech && !assistantSpeaking && appendedMs >= 200 && silenceCount >= SILENCE_FRAMES) {
         openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
         openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+        console.log("Committed on silence & requested response");
+        // reset turn trackers
         appendedMs = 0;
         silenceCount = 0;
-        console.log("Committed on silence & requested response");
+        heardSpeech = false;
       }
     }
 
@@ -345,6 +351,7 @@ case "media": {
   }
   break;
 }
+
 
 
       case "stop": {
