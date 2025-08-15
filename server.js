@@ -137,7 +137,7 @@ wss.on("connection", async (twilioWs) => {
           },
           input_audio_format:  "pcm16",
           output_audio_format: "pcm16",
-          input_audio_transcription: { language: "en" }
+          input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
         }
       }));
       console.log("OpenAI connected (sent session.update, waiting for session.updated)");
