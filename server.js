@@ -293,12 +293,6 @@ wss.on("connection", async (twilioWs) => {
             const pcm16k = upsample8kTo16k(pcm8k);
             const b64pcm16 = i16ToB64(pcm16k);
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
-
-// Light periodic commit (no response.create; server VAD handles replies)
-frames = (frames + 1) % 1000000;
-if (frames % 60 === 0) {
-  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-}
           }
 
           // Echo caller UNTIL assistant starts talking
