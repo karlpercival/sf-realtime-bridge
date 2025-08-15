@@ -142,10 +142,10 @@ output_audio_format: "pcm16",
       }));
 
       // Quick greeting so the line feels alive
-      openaiWs.send(JSON.stringify({
-        type: "response.create",
-        response: { modalities: ["audio"], instructions: "Hello—how can I help today?" }
-      }));
+openaiWs.send(JSON.stringify({
+  type: "response.create",
+  response: { modalities: ["audio", "text"], instructions: "Hello—how can I help today?" }
+}));
 
       openaiReady = true;
       console.log("OpenAI connected");
