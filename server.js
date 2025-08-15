@@ -1,10 +1,10 @@
 // server.js — Twilio <-> OpenAI Realtime (Node 20, ESM)
-// - Accepts Twilio WS subprotocol "audio" (fixes 31921)
-// - Plays a 1s beep, echoes caller UNTIL assistant starts talking
-// - Forces British English STT + TTS (alloy)
-// - 20ms μ-law pacing; correct μ-law decode
+// - Accept Twilio WS subprotocol "audio" (fixes 31921)
+// - 1s beep on connect; echo caller UNTIL assistant speaks
+// - British English only; alloy voice; server-side VAD
+// - 20ms μ-law pacing; correct μ-law encode/decode
 //
-// ENV: set OPENAI_API_KEY on Railway
+// ENV: set OPENAI_API_KEY
 
 import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
@@ -33,7 +33,7 @@ const MULAW_EXPAND = new Int16Array(256);
 })();
 function muLawDecodeToPcm16(u8) {
   const out = new Int16Array(u8.length);
-  for (let i = 0; i < u8.length; i++) out[i] = MULAW_EXPAND[u8[i]]; // correct indexing
+  for (let i = 0; i < u8.length; i++) out[i] = MULAW_EXPAND[u8[i]];
   return out;
 }
 function pcm16ToMuLaw(int16) {
@@ -83,11 +83,11 @@ wss.on("connection", async (twilioWs) => {
   const queue = [];
   const pacer = setInterval(() => {
     if (!streamSid || queue.length === 0 || twilioWs.readyState !== WebSocket.OPEN) return;
-    const frame = queue.shift(); // Uint8Array(160) = 20ms @ 8kHz
+    const frame = queue.shift(); // Uint8Array(160) = 20ms @ 8kHz μ-law
     twilioWs.send(JSON.stringify({
       event: "media",
       streamSid,
-      media: { payload: u8ToB64(frame) } // EXACT shape Twilio expects
+      media: { payload: u8ToB64(frame) }
     }));
   }, 20);
 
@@ -95,14 +95,13 @@ wss.on("connection", async (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // >>> Step 1 addition: assistant speaking flag + helpers <<<
+  // Assistant speaking flag + helpers (controls echo)
   let assistantSpeaking = false;
   let speakingResetTimer = null;
   const markAssistantSpeaking = () => {
     if (!assistantSpeaking) console.log("Assistant started speaking");
     assistantSpeaking = true;
     if (speakingResetTimer) clearTimeout(speakingResetTimer);
-    // Safety timeout in case we miss a completion event
     speakingResetTimer = setTimeout(() => {
       assistantSpeaking = false;
       console.log("Assistant speaking auto-cleared (timeout)");
@@ -113,7 +112,6 @@ wss.on("connection", async (twilioWs) => {
     assistantSpeaking = false;
     if (speakingResetTimer) { clearTimeout(speakingResetTimer); speakingResetTimer = null; }
   };
-  // >>> end Step 1 addition <<<
 
   try {
     openaiWs = new WebSocket(OPENAI_WS_URL, {
@@ -126,7 +124,7 @@ wss.on("connection", async (twilioWs) => {
         type: "session.update",
         session: {
           instructions:
-            "You are the SmartFlows phone agent. ALWAYS respond in British English only. Never switch languages. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
+            "You are the SmartFlows phone agent. ALWAYS respond in British English only. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
           voice: "alloy",
           modalities: ["audio", "text"],
           turn_detection: {
@@ -139,11 +137,11 @@ wss.on("connection", async (twilioWs) => {
           },
           input_audio_format:  { type: "pcm16", sample_rate_hz: 16000 },
           output_audio_format: { type: "pcm16", sample_rate_hz: 24000 },
-          input_audio_transcription: { language: "en" } // force English STT
+          input_audio_transcription: { language: "en" }
         }
       }));
 
-      // Small greeting so line feels responsive
+      // Quick greeting so the line feels alive
       openaiWs.send(JSON.stringify({
         type: "response.create",
         response: { modalities: ["audio"], instructions: "Hello—how can I help today?" }
@@ -153,78 +151,84 @@ wss.on("connection", async (twilioWs) => {
       console.log("OpenAI connected");
     });
 
-// OpenAI -> audio deltas -> μ-law frames -> queue (with verbose debug)
-let oaDebug = 0;
-openaiWs.on("message", (buf) => {
-  try {
-    const txt = buf.toString();
-    let msg;
-    try { msg = JSON.parse(txt); } catch { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
+    // OpenAI -> audio deltas -> μ-law frames -> queue (verbose for first 30 events)
+    let oaDebug = 0;
+    openaiWs.on("message", (buf) => {
+      try {
+        const txt = buf.toString();
+        let msg;
+        try { msg = JSON.parse(txt); } catch (e) { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
 
-    // Verbose: show first 30 events with a short payload preview
-    if (oaDebug < 30) {
-      console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
-      oaDebug++;
-    }
+        if (oaDebug < 30) {
+          console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
+          oaDebug++;
+        }
 
-    if (msg.type === "response.output_audio.delta" && msg.delta) {
-      markAssistantSpeaking();
-      const raw = Buffer.from(msg.delta, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
+        // Primary delta
+        if (msg.type === "response.output_audio.delta" && msg.delta) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.delta, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
-    if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
-      markAssistantSpeaking();
-      const raw = Buffer.from(msg.delta || msg.audio, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
+        // Fallback names seen on some accounts
+        if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.delta || msg.audio, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
-    if (msg.type === "output_audio.delta" && msg.audio) {
-      markAssistantSpeaking();
-      const raw = Buffer.from(msg.audio, "base64");
-      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-      const pcm8k = downsampleIntFactor(pcm, 3);
-      const ulaw = pcm16ToMuLaw(pcm8k);
-      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-      return;
-    }
+        if (msg.type === "output_audio.delta" && msg.audio) {
+          markAssistantSpeaking();
+          const raw = Buffer.from(msg.audio, "base64");
+          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+          const pcm8k = downsampleIntFactor(pcm, 3);
+          const ulaw = pcm16ToMuLaw(pcm8k);
+          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+          return;
+        }
 
-    // If model is only sending text
-    if (msg.type === "response.output_text.delta" && msg.delta) {
-      return;
-    }
+        // Text-only visibility
+        if (msg.type === "response.output_text.delta" && msg.delta) {
+          return;
+        }
 
-    // End-of-turn signals → allow echo again
-    if (
-      msg.type === "response.completed" ||
-      msg.type === "response.finished"  ||
-      msg.type === "response.output_audio.done" ||
-      msg.type === "response.done"
-    ) {
-      clearAssistantSpeaking();
-      return;
-    }
+        // End-of-turn signals → allow echo again
+        if (
+          msg.type === "response.completed" ||
+          msg.type === "response.finished"  ||
+          msg.type === "response.output_audio.done" ||
+          msg.type === "response.done"
+        ) {
+          clearAssistantSpeaking();
+          return;
+        }
 
-    // Error visibility
-    if (msg.type === "error" || msg.type === "response.error") {
-      console.log("OpenAI error event:", JSON.stringify(msg));
-      return;
-    }
+        // Error visibility
+        if (msg.type === "error" || msg.type === "response.error") {
+          console.log("OpenAI error event:", JSON.stringify(msg));
+          return;
+        }
+
+      } catch (e) {
+        console.log("OpenAI message handler error:", e?.message || e);
+      }
+    });
+
+    openaiWs.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
+    openaiWs.on("close", (c, r) => { console.log("OpenAI WS closed:", c, r ? String(r) : ""); openaiReady = false; });
 
   } catch (e) {
-    console.log("OpenAI message handler error:", e?.message || e);
+    console.error("OpenAI connect failed:", e?.message || e);
   }
-});
-
-
 
   // ---- Twilio -> (OpenAI + conditional echo) ----
   let debugCount = 0;
@@ -232,7 +236,8 @@ openaiWs.on("message", (buf) => {
 
   twilioWs.on("message", (msg) => {
     const txt = msg.toString();
-    let data; try { data = JSON.parse(txt); } catch { console.log("non-JSON from Twilio:", txt.slice(0,120)); return; }
+    let data;
+    try { data = JSON.parse(txt); } catch (e) { console.log("non-JSON from Twilio:", txt.slice(0,120)); return; }
 
     if (debugCount < 5 && data.event !== "media") {
       console.log("Twilio event:", data.event, JSON.stringify(data).slice(0, 200));
@@ -244,11 +249,11 @@ openaiWs.on("message", (buf) => {
         streamSid = data.start?.streamSid || data.streamSid || null;
         console.log("Twilio stream started:", streamSid);
 
-        // 1 s test beep so caller hears something immediately
+        // 1 s test beep (1 kHz) so caller hears something immediately
         const frames = 50, samplesPerFrame = 160, total = frames * samplesPerFrame;
         const tonePcm = new Int16Array(total);
         for (let i = 0; i < total; i++) {
-          const s = Math.sin(2 * Math.PI * 1000 * (i / 8000)); // 1 kHz
+          const s = Math.sin(2 * Math.PI * 1000 * (i / 8000));
           tonePcm[i] = Math.round(s * 12000);
         }
         const toneU = pcm16ToMuLaw(tonePcm);
@@ -270,16 +275,14 @@ openaiWs.on("message", (buf) => {
             const b64pcm16 = i16ToB64(pcm16k);
             openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64pcm16 }));
 
-            // Every ~1s of speech, force a commit + response to keep things snappy
-frames = (frames + 1) % 1000000;
-if (frames % 60 === 0) {
-  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-  // no response.create here; server VAD (create_response:true) will handle replies
-}
-
+            // Light periodic commit (no response.create; server VAD handles replies)
+            frames = (frames + 1) % 1000000;
+            if (frames % 60 === 0) {
+              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            }
           }
 
-          // Echo caller UNTIL assistant starts talking, then stop echoing
+          // Echo caller UNTIL assistant starts talking
           if (!assistantSpeaking) {
             queue.push(ulaw);
           }
@@ -291,8 +294,8 @@ if (frames % 60 === 0) {
 
       case "stop": {
         console.log("Twilio stream stopped");
-        try { openaiWs?.close(); } catch {}
-        try { twilioWs.close(); } catch {}
+        try { openaiWs?.close(); } catch (e) {}
+        try { twilioWs.close(); } catch (e) {}
         break;
       }
     }
@@ -301,10 +304,9 @@ if (frames % 60 === 0) {
   twilioWs.on("close", () => {
     console.log("Twilio WS closed");
     clearInterval(pacer);
-    try { openaiWs?.close(); } catch {}
+    try { openaiWs?.close(); } catch (e) {}
   });
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
-}); // ← THIS is the final line of server.js; there should be NO extra "});" after it
-
+}); // final line — no extra closers below
 
