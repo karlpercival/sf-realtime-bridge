@@ -2,9 +2,8 @@
 // - Accepts Twilio WS subprotocol "audio"
 // - 1s beep on connect; echoes caller UNTIL assistant speaks
 // - British English only; alloy voice
-// - Server VAD used only for barge-in (no auto create_response)
-// - Commit-on-silence fallback drives replies (single-turn)
-// - 20ms μ-law pacing; correct μ-law encode/decode
+// - Server VAD handles turn-taking (create_response: true)
+// - We ONLY append audio (no manual commit / response.create except initial greeting)
 //
 // ENV: set OPENAI_API_KEY
 
@@ -97,40 +96,18 @@ wss.on("connection", async (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // Echo / turn-control state
-  let assistantSpeaking = false;    // flips true on first audio delta
+  // Echo control
+  let assistantSpeaking = false;
   let speakingResetTimer = null;
-
-// Fallback VAD (commit-on-silence)
-let appendedMs = 0;            // how much audio we've sent since last commit (ms)
-let silenceCount = 0;          // consecutive 20ms frames below threshold
-const SILENCE_FRAMES = 25;     // ~500ms of silence (was 20)
-const SILENCE_THRESH = 300;    // easier to detect real speech (was 600)
-let heardSpeech = false;       // have we detected any speech since last commit?
-let speechFrames = 0;          // number of 20ms frames judged as speech
-let responseInProgress = false;   // true between response.created and response.done
-
-
-  const resetUserTurnTracking = () => {
-    appendedMs = 0;
-    silenceCount = 0;
-    heardSpeech = false;
-  };
-
   const markAssistantSpeaking = () => {
     if (!assistantSpeaking) console.log("Assistant started speaking");
     assistantSpeaking = true;
     if (speakingResetTimer) clearTimeout(speakingResetTimer);
-
-    // Never commit while the assistant is talking
-    resetUserTurnTracking();
-
     speakingResetTimer = setTimeout(() => {
       assistantSpeaking = false;
       console.log("Assistant speaking auto-cleared (timeout)");
     }, 800);
   };
-
   const clearAssistantSpeaking = () => {
     if (assistantSpeaking) console.log("Assistant finished speaking");
     assistantSpeaking = false;
@@ -143,7 +120,7 @@ let responseInProgress = false;   // true between response.created and response.
     });
 
     openaiWs.on("open", () => {
-      // Apply session settings (English-only, server VAD for barge-in only)
+      // Apply session settings (English-only, server VAD handles replies)
       openaiWs.send(JSON.stringify({
         type: "session.update",
         session: {
@@ -152,13 +129,12 @@ let responseInProgress = false;   // true between response.created and response.
           voice: "alloy",
           modalities: ["audio", "text"],
           turn_detection: {
-  type: "server_vad",
-  threshold: 0.5,
-  prefix_padding_ms: 300,
-  silence_duration_ms: 200,
-  create_response: true,    // ← changed to true
-  interrupt_response: true
-},
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 200,
+            create_response: true,  // let OpenAI trigger replies on end-of-speech
+            interrupt_response: true
           },
           input_audio_format:  "pcm16",
           output_audio_format: "pcm16",
@@ -179,28 +155,21 @@ let responseInProgress = false;   // true between response.created and response.
       try { msg = JSON.parse(txt); }
       catch { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
 
-      // After settings apply, send the greeting
       if (msg.type === "session.updated") {
         console.log("OpenAI event: session.updated — settings applied");
+        // Initial greeting (only once)
         openaiWs.send(JSON.stringify({
           type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            instructions: "Hello — how can I help today? (British English only.)"
-          }
+          response: { modalities: ["audio", "text"], instructions: "Hello — how can I help today? (British English only.)" }
         }));
         return;
       }
 
       if (oaDebug < 30) { console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240)); oaDebug++; }
 
-      // In-flight tracking
+      // Track reply lifecycle
       if (msg.type === "response.created") {
-        responseInProgress = true;
-        resetUserTurnTracking(); // don't accumulate user audio mid-reply
-      }
-      if (msg.type === "response.done" || msg.type === "response.completed" || msg.type === "response.finished") {
-        responseInProgress = false;
+        // nothing extra; server VAD is in control
       }
 
       // Audio deltas (primary & fallbacks)
@@ -231,9 +200,6 @@ let responseInProgress = false;   // true between response.created and response.
         for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
         return;
       }
-
-      // Text-only visibility (no action needed)
-      if (msg.type === "response.output_text.delta" && msg.delta) return;
 
       // End-of-turn → allow echo again
       if (
@@ -297,30 +263,27 @@ let responseInProgress = false;   // true between response.created and response.
         break;
       }
 
-    case "media": {
-  try {
-    const ulaw = b64ToU8(data.media?.payload || "");
-    if (ulaw.length !== 160) break; // 20ms @ 8kHz
+      case "media": {
+        try {
+          const ulaw = b64ToU8(data.media?.payload || "");
+          if (ulaw.length !== 160) break; // 20ms @ 8kHz
 
-    // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
-    if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
-      const pcm8k  = muLawDecodeToPcm16(ulaw);
-      const pcm16k = upsample8kTo16k(pcm8k);
-      // Append audio; DO NOT commit – server VAD (create_response:true) will trigger replies
-      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
-    }
+          // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
+          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
+            const pcm8k  = muLawDecodeToPcm16(ulaw);
+            const pcm16k = upsample8kTo16k(pcm8k);
+            // Append audio; DO NOT commit – server VAD (create_response:true) will trigger replies
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
+          }
 
-    // Echo caller UNTIL assistant starts talking
-    if (!assistantSpeaking) {
-      queue.push(ulaw);
-    }
-  } catch (e) {
-    console.error("Media forward error:", e?.message || e);
-  }
-  break;
-}
+          // Echo caller UNTIL assistant starts talking
+          if (!assistantSpeaking) queue.push(ulaw);
 
-
+        } catch (e) {
+          console.error("Media forward error:", e?.message || e);
+        }
+        break;
+      }
 
       case "stop": {
         console.log("Twilio stream stopped");
@@ -339,4 +302,3 @@ let responseInProgress = false;   // true between response.created and response.
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
-
