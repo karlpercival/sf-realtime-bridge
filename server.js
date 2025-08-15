@@ -134,14 +134,15 @@ const markAssistantSpeaking = () => {
             "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). Never use any other language. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.",
           voice: "alloy",
           modalities: ["audio", "text"],
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
-            create_response: true,
-            interrupt_response: true
-          },
+        turn_detection: {
+  type: "server_vad",
+  threshold: 0.5,
+  prefix_padding_ms: 300,
+  silence_duration_ms: 200,
+  create_response: false,   // ← stop auto replies
+  interrupt_response: true
+},
+
           input_audio_format:  "pcm16",
           output_audio_format: "pcm16",
           input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
