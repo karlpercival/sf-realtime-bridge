@@ -101,13 +101,15 @@ wss.on("connection", async (twilioWs) => {
   let assistantSpeaking = false;    // flips true on first audio delta
   let speakingResetTimer = null;
 
-  // Commit-on-silence VAD state
-  let appendedMs = 0;               // audio appended since last commit (ms)
-  let silenceCount = 0;             // consecutive 20ms frames below threshold
-  const SILENCE_FRAMES = 20;        // ~400ms
-  const SILENCE_THRESH = 600;       // simple peak threshold on 16-bit PCM
-  let heardSpeech = false;          // saw any speech since last commit
-  let responseInProgress = false;   // between response.created and response.done
+// Fallback VAD (commit-on-silence)
+let appendedMs = 0;            // how much audio we've sent since last commit (ms)
+let silenceCount = 0;          // consecutive 20ms frames below threshold
+const SILENCE_FRAMES = 25;     // ~500ms of silence (was 20)
+const SILENCE_THRESH = 300;    // easier to detect real speech (was 600)
+let heardSpeech = false;       // have we detected any speech since last commit?
+let speechFrames = 0;          // number of 20ms frames judged as speech
+let responseInProgress = false;   // true between response.created and response.done
+
 
   const resetUserTurnTracking = () => {
     appendedMs = 0;
@@ -294,56 +296,67 @@ wss.on("connection", async (twilioWs) => {
         break;
       }
 
-      case "media": {
-        try {
-          const ulaw = b64ToU8(data.media?.payload || "");
-          if (ulaw.length !== 160) break;
+     case "media": {
+  try {
+    const ulaw = b64ToU8(data.media?.payload || "");
+    if (ulaw.length !== 160) break;
 
-          // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
-          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
-            const pcm8k  = muLawDecodeToPcm16(ulaw);
-            const pcm16k = upsample8kTo16k(pcm8k);
+    // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
+    if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
+      const pcm8k  = muLawDecodeToPcm16(ulaw);
+      const pcm16k = upsample8kTo16k(pcm8k);
 
-            // Append caller audio (20 ms per frame)
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
-            appendedMs += 20;
+      // Append caller audio (20 ms per frame)
+      openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
+      appendedMs += 20;
 
-            // Simple energy check for silence detection
-            let peak = 0;
-            for (let i = 0; i < pcm16k.length; i += 16) {
-              const v = pcm16k[i] < 0 ? -pcm16k[i] : pcm16k[i];
-              if (v > peak) peak = v;
-            }
-            if (peak >= SILENCE_THRESH) {
-              heardSpeech = true;
-              silenceCount = 0;
-            } else {
-              silenceCount++;
-            }
-
-            // Commit only if:
-            // - we heard real speech since the last commit,
-            // - there’s ~400 ms of silence (end of caller turn),
-            // - and there is NO response already in progress.
-            if (heardSpeech && !responseInProgress && appendedMs >= 200 && silenceCount >= SILENCE_FRAMES) {
-              openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-              openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
-              console.log("Committed on silence & requested response");
-              resetUserTurnTracking();
-            }
-          } else {
-            // While assistant speaks or OpenAI not ready, never accumulate user buffer
-            resetUserTurnTracking();
-          }
-
-          // Echo caller UNTIL assistant starts talking
-          if (!assistantSpeaking) queue.push(ulaw);
-
-        } catch (e) {
-          console.error("Media forward error:", e?.message || e);
-        }
-        break;
+      // Simple energy check for speech vs silence
+      let peak = 0;
+      for (let i = 0; i < pcm16k.length; i += 16) { // sample ~every 1ms
+        const v = pcm16k[i] < 0 ? -pcm16k[i] : pcm16k[i];
+        if (v > peak) peak = v;
       }
+
+      if (peak >= SILENCE_THRESH) {
+        heardSpeech = true;
+        speechFrames++;        // count speech frames
+        silenceCount = 0;      // reset silence run
+      } else {
+        silenceCount++;
+      }
+
+      // Commit only if:
+      // - we heard real speech since the last commit,
+      // - we've accumulated enough speech frames (>= 12 ≈ 240ms of voiced audio),
+      // - we then observe ~500ms of silence (end of caller turn),
+      // - and there is NO response already in progress.
+      if (heardSpeech && speechFrames >= 12 && !responseInProgress && silenceCount >= SILENCE_FRAMES) {
+        openaiWs.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        openaiWs.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+        console.log("Committed on silence & requested response (speechFrames=%d)", speechFrames);
+        // reset turn trackers
+        appendedMs = 0;
+        silenceCount = 0;
+        heardSpeech = false;
+        speechFrames = 0;
+      }
+    } else {
+      // While assistant speaks or OpenAI not ready, never accumulate user buffer
+      appendedMs = 0;
+      silenceCount = 0;
+      heardSpeech = false;
+      speechFrames = 0;
+    }
+
+    // Echo caller UNTIL assistant starts talking
+    if (!assistantSpeaking) queue.push(ulaw);
+
+  } catch (e) {
+    console.error("Media forward error:", e?.message || e);
+  }
+  break;
+}
+
 
       case "stop": {
         console.log("Twilio stream stopped");
