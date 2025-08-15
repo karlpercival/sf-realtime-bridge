@@ -118,35 +118,37 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-    openaiWs.on("open", () => {
-      // Force British English, alloy voice, server VAD
-      openaiWs.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions:
-            "You are the SmartFlows phone agent. ALWAYS respond in British English only. Keep replies to 1–2 sentences and end with a helpful question when appropriate.",
-          voice: "alloy",
-          modalities: ["audio", "text"],
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
-            create_response: true,
-            interrupt_response: true
-          },
-input_audio_format:  "pcm16",
-output_audio_format: "pcm16",
-          input_audio_transcription: { language: "en" }
-        }
-      }));
+openaiWs.on("open", () => {
+  // 1) Apply session settings (English-only, server VAD, etc.)
+  openaiWs.send(JSON.stringify({
+    type: "session.update",
+    session: {
+      instructions:
+        "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). Never use any other language. If the caller speaks another language, apologise briefly and continue in British English. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.",
+      voice: "alloy",
+      modalities: ["audio", "text"],
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 200,
+        create_response: true,
+        interrupt_response: true
+      },
+      input_audio_format:  "pcm16",
+      output_audio_format: "pcm16",
+      input_audio_transcription: { language: "en" }
+    }
+  }));
+
+  console.log("OpenAI connected (sent session.update, waiting for session.updated)");
+});
 
       // Quick greeting so the line feels alive
 openaiWs.send(JSON.stringify({
   type: "response.create",
   response: { modalities: ["audio", "text"], instructions: "Hello—how can I help today?" }
 }));
-
       openaiReady = true;
       console.log("OpenAI connected");
     });
@@ -159,6 +161,19 @@ openaiWs.send(JSON.stringify({
         let msg;
         try { msg = JSON.parse(txt); } catch (e) { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
 
+    // ---- GREETING AFTER SETTINGS APPLY ----
+    if (msg.type === "session.updated") {
+      console.log("OpenAI event: session.updated — settings applied");
+      openaiWs.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: "Hello — how can I help today? (British English only.)"
+        }
+      }));
+      return;
+    }
+        
         if (oaDebug < 30) {
           console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
           oaDebug++;
