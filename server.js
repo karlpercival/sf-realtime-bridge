@@ -153,13 +153,13 @@ openaiWs.send(JSON.stringify({
       console.log("OpenAI connected");
     });
 
-    // OpenAI -> audio deltas -> μ-law frames -> queue (verbose for first 30 events)
-    let oaDebug = 0;
-    openaiWs.on("message", (buf) => {
-      try {
-        const txt = buf.toString();
-        let msg;
-        try { msg = JSON.parse(txt); } catch (e) { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
+// OpenAI -> audio deltas -> μ-law frames -> queue (verbose for first 30 events)
+let oaDebug = 0;
+openaiWs.on("message", (buf) => {
+  try {
+    const txt = buf.toString();
+    let msg;
+    try { msg = JSON.parse(txt); } catch (e) { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
 
     // ---- GREETING AFTER SETTINGS APPLY ----
     if (msg.type === "session.updated") {
@@ -173,70 +173,72 @@ openaiWs.send(JSON.stringify({
       }));
       return;
     }
-        
-        if (oaDebug < 30) {
-          console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
-          oaDebug++;
-        }
 
-        // Primary delta
-        if (msg.type === "response.output_audio.delta" && msg.delta) {
-          markAssistantSpeaking();
-          const raw = Buffer.from(msg.delta, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
+    // Verbose: show first 30 events
+    if (oaDebug < 30) {
+      console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
+      oaDebug++;
+    }
 
-        // Fallback names seen on some accounts
-        if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
-          markAssistantSpeaking();
-          const raw = Buffer.from(msg.delta || msg.audio, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
+    // Primary audio delta
+    if (msg.type === "response.output_audio.delta" && msg.delta) {
+      markAssistantSpeaking();
+      const raw = Buffer.from(msg.delta, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
 
-        if (msg.type === "output_audio.delta" && msg.audio) {
-          markAssistantSpeaking();
-          const raw = Buffer.from(msg.audio, "base64");
-          const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-          const pcm8k = downsampleIntFactor(pcm, 3);
-          const ulaw = pcm16ToMuLaw(pcm8k);
-          for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-          return;
-        }
+    // Fallback names on some accounts
+    if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
+      markAssistantSpeaking();
+      const raw = Buffer.from(msg.delta || msg.audio, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
 
-        // Text-only visibility
-        if (msg.type === "response.output_text.delta" && msg.delta) {
-          return;
-        }
+    if (msg.type === "output_audio.delta" && msg.audio) {
+      markAssistantSpeaking();
+      const raw = Buffer.from(msg.audio, "base64");
+      const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+      const pcm8k = downsampleIntFactor(pcm, 3);
+      const ulaw = pcm16ToMuLaw(pcm8k);
+      for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+      return;
+    }
 
-        // End-of-turn signals → allow echo again
-        if (
-          msg.type === "response.completed" ||
-          msg.type === "response.finished"  ||
-          msg.type === "response.output_audio.done" ||
-          msg.type === "response.done"
-        ) {
-          clearAssistantSpeaking();
-          return;
-        }
+    // Text-only visibility
+    if (msg.type === "response.output_text.delta" && msg.delta) {
+      return;
+    }
 
-        // Error visibility
-        if (msg.type === "error" || msg.type === "response.error") {
-          console.log("OpenAI error event:", JSON.stringify(msg));
-          return;
-        }
+    // End-of-turn signals → allow echo again
+    if (
+      msg.type === "response.completed" ||
+      msg.type === "response.finished"  ||
+      msg.type === "response.output_audio.done" ||
+      msg.type === "response.done"
+    ) {
+      clearAssistantSpeaking();
+      return;
+    }
 
-      } catch (e) {
-        console.log("OpenAI message handler error:", e?.message || e);
-      }
-    });
+    // Error visibility
+    if (msg.type === "error" || msg.type === "response.error") {
+      console.log("OpenAI error event:", JSON.stringify(msg));
+      return;
+    }
+
+  } catch (e) {
+    console.log("OpenAI message handler error:", e?.message || e);
+  }
+});
+
 
     openaiWs.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
     openaiWs.on("close", (c, r) => { console.log("OpenAI WS closed:", c, r ? String(r) : ""); openaiReady = false; });
