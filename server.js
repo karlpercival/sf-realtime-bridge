@@ -95,7 +95,7 @@ wss.on("connection", async (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // Assistant speaking flag + helpers (controls echo)
+  // Controls echo
   let assistantSpeaking = false;
   let speakingResetTimer = null;
   const markAssistantSpeaking = () => {
@@ -118,133 +118,125 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-openaiWs.on("open", () => {
-  // 1) Apply session settings (English-only, server VAD, etc.)
-  openaiWs.send(JSON.stringify({
-    type: "session.update",
-    session: {
-      instructions:
-        "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). Never use any other language. If the caller speaks another language, apologise briefly and continue in British English. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.",
-      voice: "alloy",
-      modalities: ["audio", "text"],
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 200,
-        create_response: true,
-        interrupt_response: true
-      },
-      input_audio_format:  "pcm16",
-      output_audio_format: "pcm16",
-      input_audio_transcription: { language: "en" }
-    }
-  }));
-
-  console.log("OpenAI connected (sent session.update, waiting for session.updated)");
-});
-
-      // Quick greeting so the line feels alive
-openaiWs.send(JSON.stringify({
-  type: "response.create",
-  response: { modalities: ["audio", "text"], instructions: "Hello—how can I help today?" }
-}));
+    openaiWs.on("open", () => {
+      // Apply session settings (English-only, server VAD, etc.)
+      openaiWs.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions:
+            "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). Never use any other language. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.",
+          voice: "alloy",
+          modalities: ["audio", "text"],
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 200,
+            create_response: true,
+            interrupt_response: true
+          },
+          input_audio_format:  "pcm16",
+          output_audio_format: "pcm16",
+          input_audio_transcription: { language: "en" }
+        }
+      }));
+      console.log("OpenAI connected (sent session.update, waiting for session.updated)");
       openaiReady = true;
-      console.log("OpenAI connected");
     });
 
-// OpenAI -> audio deltas -> μ-law frames -> queue (verbose for first 30 events)
-let oaDebug = 0;
-openaiWs.on("message", (buf) => {
-  const txt = buf.toString();
+    // OpenAI -> audio deltas -> μ-law frames -> queue (verbose for first 30 events)
+    let oaDebug = 0;
+    openaiWs.on("message", (buf) => {
+      const txt = buf.toString();
 
-  // Parse once, with a tight try/catch (no outer try)
-  let msg;
-  try {
-    msg = JSON.parse(txt);
-  } catch (e) {
-    console.log("OpenAI non-JSON frame:", txt.slice(0, 120));
-    return;
-  }
-
-  // ---- GREETING AFTER SETTINGS APPLY ----
-  if (msg.type === "session.updated") {
-    console.log("OpenAI event: session.updated — settings applied");
-    openaiWs.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["audio", "text"],
-        instructions: "Hello — how can I help today? (British English only.)"
+      // Parse once, tight try/catch
+      let msg;
+      try {
+        msg = JSON.parse(txt);
+      } catch (e) {
+        console.log("OpenAI non-JSON frame:", txt.slice(0, 120));
+        return;
       }
-    }));
-    return;
-  }
 
-  // Verbose: show first 30 events
-  if (oaDebug < 30) {
-    console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
-    oaDebug++;
-  }
+      // After settings apply, send the greeting
+      if (msg.type === "session.updated") {
+        console.log("OpenAI event: session.updated — settings applied");
+        openaiWs.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            instructions: "Hello — how can I help today? (British English only.)"
+          }
+        }));
+        return;
+      }
 
-  // Primary audio delta
-  if (msg.type === "response.output_audio.delta" && msg.delta) {
-    markAssistantSpeaking();
-    const raw = Buffer.from(msg.delta, "base64");
-    const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-    const pcm8k = downsampleIntFactor(pcm, 3);
-    const ulaw = pcm16ToMuLaw(pcm8k);
-    for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-    return;
-  }
+      // Verbose: show first 30 events
+      if (oaDebug < 30) {
+        console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240));
+        oaDebug++;
+      }
 
-  // Fallback names on some accounts
-  if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
-    markAssistantSpeaking();
-    const raw = Buffer.from(msg.delta || msg.audio, "base64");
-    const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-    const pcm8k = downsampleIntFactor(pcm, 3);
-    const ulaw = pcm16ToMuLaw(pcm8k);
-    for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-    return;
-  }
+      // Primary audio delta
+      if (msg.type === "response.output_audio.delta" && msg.delta) {
+        markAssistantSpeaking();
+        const raw = Buffer.from(msg.delta, "base64");
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+        const pcm8k = downsampleIntFactor(pcm, 3);
+        const ulaw = pcm16ToMuLaw(pcm8k);
+        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        return;
+      }
 
-  if (msg.type === "output_audio.delta" && msg.audio) {
-    markAssistantSpeaking();
-    const raw = Buffer.from(msg.audio, "base64");
-    const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-    const pcm8k = downsampleIntFactor(pcm, 3);
-    const ulaw = pcm16ToMuLaw(pcm8k);
-    for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
-    return;
-  }
+      // Fallback names seen on some accounts
+      if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
+        markAssistantSpeaking();
+        const raw = Buffer.from(msg.delta || msg.audio, "base64");
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+        const pcm8k = downsampleIntFactor(pcm, 3);
+        const ulaw = pcm16ToMuLaw(pcm8k);
+        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        return;
+      }
 
-  // Text-only visibility
-  if (msg.type === "response.output_text.delta" && msg.delta) {
-    return;
-  }
+      if (msg.type === "output_audio.delta" && msg.audio) {
+        markAssistantSpeaking();
+        const raw = Buffer.from(msg.audio, "base64");
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
+        const pcm8k = downsampleIntFactor(pcm, 3);
+        const ulaw = pcm16ToMuLaw(pcm8k);
+        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        return;
+      }
 
-  // End-of-turn signals → allow echo again
-  if (
-    msg.type === "response.completed" ||
-    msg.type === "response.finished"  ||
-    msg.type === "response.output_audio.done" ||
-    msg.type === "response.done"
-  ) {
-    clearAssistantSpeaking();
-    return;
-  }
+      // Text-only visibility
+      if (msg.type === "response.output_text.delta" && msg.delta) {
+        return;
+      }
 
-  // Error visibility
-  if (msg.type === "error" || msg.type === "response.error") {
-    console.log("OpenAI error event:", JSON.stringify(msg));
-    return;
-  }
-}); // end openaiWs.on("message")
+      // End-of-turn signals → allow echo again
+      if (
+        msg.type === "response.completed" ||
+        msg.type === "response.finished"  ||
+        msg.type === "response.output_audio.done" ||
+        msg.type === "response.done"
+      ) {
+        clearAssistantSpeaking();
+        return;
+      }
 
-
+      // Error visibility
+      if (msg.type === "error" || msg.type === "response.error") {
+        console.log("OpenAI error event:", JSON.stringify(msg));
+        return;
+      }
+    });
 
     openaiWs.on("error", (e) => console.error("OpenAI WS error:", e?.message || e));
-    openaiWs.on("close", (c, r) => { console.log("OpenAI WS closed:", c, r ? String(r) : ""); openaiReady = false; });
+    openaiWs.on("close", (c, r) => {
+      console.log("OpenAI WS closed:", c, r ? String(r) : "");
+      openaiReady = false;
+    });
 
   } catch (e) {
     console.error("OpenAI connect failed:", e?.message || e);
@@ -256,8 +248,15 @@ openaiWs.on("message", (buf) => {
 
   twilioWs.on("message", (msg) => {
     const txt = msg.toString();
+
+    // Parse Twilio JSON safely
     let data;
-    try { data = JSON.parse(txt); } catch (e) { console.log("non-JSON from Twilio:", txt.slice(0,120)); return; }
+    try {
+      data = JSON.parse(txt);
+    } catch (e) {
+      console.log("non-JSON from Twilio:", txt.slice(0,120));
+      return;
+    }
 
     if (debugCount < 5 && data.event !== "media") {
       console.log("Twilio event:", data.event, JSON.stringify(data).slice(0, 200));
@@ -329,4 +328,3 @@ openaiWs.on("message", (buf) => {
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
-
