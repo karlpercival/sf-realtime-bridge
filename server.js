@@ -274,8 +274,7 @@ if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
 }
 
 
-          // Echo caller UNTIL assistant starts talking
-          if (!assistantSpeaking) queue.push(ulaw);
+
 
         } catch (e) {
           console.error("Media forward error:", e?.message || e);
