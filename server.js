@@ -1,12 +1,11 @@
 // server.js — Twilio <-> OpenAI Realtime (Node 20, ESM)
 // - Accept Twilio WS subprotocol "audio"
-// - 1s beep on connect; NO echo (prevents talk-over)
-// - British English only; alloy voice
-// - Server VAD handles turn-taking (create_response: true, interrupt_response: true)
-// - INPUT: Twilio μ-law (8 kHz) forwarded raw to OpenAI (g711_ulaw)
+// - 1s beep on connect; NO echo
+// - British English; server VAD (create_response: true, interrupt_response: true)
+// - INPUT: Twilio g711_ulaw (8 kHz) forwarded raw to OpenAI
 // - OUTPUT: OpenAI PCM16 @ 24 kHz -> FIR low-pass -> decimate-by-3 to 8 kHz -> μ-law -> 20ms frames
 //
-// ENV: set OPENAI_API_KEY
+// ENV: OPENAI_API_KEY must be set
 
 import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
@@ -70,6 +69,10 @@ wss.on("connection", async (twilioWs) => {
   // ---- OpenAI Realtime ----
   let openaiWs = null;
   let openaiReady = false;
+
+  // Per-call context from Twilio <Parameter>
+  let symParam = "";
+  let instParam = "";
 
   // Talk-over control (no echo)
   let assistantSpeaking = false;
@@ -164,58 +167,75 @@ wss.on("connection", async (twilioWs) => {
   // Build the decimator instance per call
   const decimate24kTo8k = makeDecimatorBy3_24kTo8k();
 
+  // Base instructions (British English); will be augmented by sym/inst
+  const baseInstructions =
+    "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). " +
+    "Never use any other language. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.";
+
+  // Compose and apply instruction update (safe to call any time after OpenAI WS open)
+  function applySessionInstructions() {
+    const parts = [baseInstructions];
+    if (symParam)  parts.push(`Sym: ${symParam}.`);
+    if (instParam) parts.push(`Task: ${instParam}`);
+    if (openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+      openaiWs.send(JSON.stringify({
+        type: "session.update",
+        session: { instructions: parts.join(" ") } // partial update: only instructions
+      }));
+    }
+  }
+
+  // Send one greeting after we know the sym/inst (avoids race)
+  let greetingSent = false;
+  function sendGreetingOnce() {
+    if (greetingSent || !openaiReady || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
+    greetingSent = true;
+    const greet = symParam
+      ? `Hello — you’re connected to ${symParam}. How can I help today?`
+      : "Hello — how can I help today?";
+    openaiWs.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["audio", "text"], instructions: greet }
+    }));
+  }
+
   try {
     openaiWs = new WebSocket(OPENAI_WS_URL, {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
     openaiWs.on("open", () => {
-      // Session settings
+      // Session configuration; instructions will be refined after Twilio 'start'
       openaiWs.send(JSON.stringify({
         type: "session.update",
         session: {
-          instructions:
-            "You are the SmartFlows phone agent. RESPOND ONLY IN BRITISH ENGLISH (en-GB). Never use any other language. Keep replies to 1–2 short sentences and end with a helpful question when appropriate.",
+          instructions: baseInstructions,
           voice: "alloy",
           modalities: ["audio", "text"],
           turn_detection: {
             type: "server_vad",
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 200,   // silence_duration_ms: 350, That gives you ~⅓ second of confirmed silence before the assistant speaks, which usually feels more human on the phone and reduces cut-offs.
+            silence_duration_ms: 200,
             create_response: true,   // auto reply on end-of-speech
             interrupt_response: true // barge-in
           },
-          input_audio_format:  "g711_ulaw",                              // Twilio μ-law in
-output_audio_format: "pcm16",
+          input_audio_format:  "g711_ulaw", // Twilio μ-law in
+          output_audio_format: "pcm16",     // 24k PCM out (default)
           input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
         }
       }));
-      console.log("OpenAI connected (sent session.update, waiting for session.updated)");
+      console.log("OpenAI connected (sent session.update)");
       openaiReady = true;
     });
 
-    // OpenAI events
-    let oaDebug = 0;
     openaiWs.on("message", (buf) => {
       const txt = buf.toString();
-
-      // Parse once
       let msg;
-      try { msg = JSON.parse(txt); }
-      catch { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
+      try { msg = JSON.parse(txt); } catch { console.log("OpenAI non-JSON frame:", txt.slice(0, 120)); return; }
 
-      if (msg.type === "session.updated") {
-        console.log("OpenAI event: session.updated — settings applied");
-        // Initial greeting (only once)
-        openaiWs.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["audio", "text"], instructions: "Hello — how can I help today? (British English only.)" }
-        }));
-        return;
-      }
-
-      if (oaDebug < 30) { console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240)); oaDebug++; }
+      // Log first few event types for visibility
+      // console.log("OpenAI event:", msg.type);
 
       // Assistant audio (PCM16 @ 24k) -> resample to 8k -> μ-law -> 20ms frames
       if (msg.type === "response.output_audio.delta" && msg.delta) {
@@ -254,7 +274,7 @@ output_audio_format: "pcm16",
         return;
       }
 
-      // Error visibility
+      // Errors
       if (msg.type === "error" || msg.type === "response.error") {
         console.log("OpenAI error event:", JSON.stringify(msg));
         return;
@@ -291,6 +311,15 @@ output_audio_format: "pcm16",
         streamSid = data.start?.streamSid || data.streamSid || null;
         console.log("Twilio stream started:", streamSid);
 
+        // Get custom <Parameter> values (sym / inst) and push into session
+        const cp = data.start?.customParameters || {};
+        symParam  = typeof cp.sym  === "string" ? cp.sym  : "";
+        instParam = typeof cp.inst === "string" ? cp.inst : "";
+        if (symParam || instParam) {
+          console.log("Received customParameters:", { sym: symParam, inst: instParam });
+          applySessionInstructions();
+        }
+
         // 1s test beep (1 kHz) so caller hears something immediately
         const frames = 50, samplesPerFrame = 160, total = frames * samplesPerFrame;
         const tonePcm = new Int16Array(total);
@@ -302,6 +331,9 @@ output_audio_format: "pcm16",
         for (let i = 0; i + samplesPerFrame <= toneU.length; i += samplesPerFrame) {
           queue.push(toneU.subarray(i, i + samplesPerFrame));
         }
+
+        // Send greeting once (after we’ve seen any sym/inst)
+        sendGreetingOnce();
         break;
       }
 
@@ -341,4 +373,5 @@ output_audio_format: "pcm16",
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
+
 
