@@ -29,7 +29,7 @@ const server = app.listen(process.env.PORT || 8080, () => {
   console.log("Bridge listening on", typeof addr === "object" ? addr.port : addr);
 });
 
-// ---------- helpers ----------
+// ---------- basic helpers ----------
 function pcm16ToMuLaw(int16) {
   const BIAS = 0x84, CLIP = 32635;
   const out = new Uint8Array(int16.length);
@@ -53,7 +53,7 @@ const u8ToB64  = (u8)  => Buffer.from(u8).toString("base64");
 function designLowpassFIR(taps, cutoffHz, srHz) {
   // Windowed-sinc (Blackman)
   const N = taps;
-  const fc = cutoffHz / srHz;          // 0..0.5
+  const fc = cutoffHz / srHz; // 0..0.5
   const a0 = 0.42, a1 = 0.5, a2 = 0.08;
   const h = new Float32Array(N);
   let sum = 0;
@@ -189,7 +189,7 @@ wss.on("connection", async (twilioWs) => {
     }
   }
 
-  // Fetch Sym-specific instructions from your API
+  // Fetch Sym-specific instructions from your API (optional)
   async function fetchSymInstructions(sym) {
     if (!SYM_API_URL) return "";
     try {
@@ -215,14 +215,38 @@ wss.on("connection", async (twilioWs) => {
     }
   }
 
+  // Fetch an OpenAI Assistant's instructions by ID (asst_...)
+  async function fetchAssistantInstructions(assistantId) {
+    if (!assistantId || !assistantId.startsWith("asst_")) return "";
+    try {
+      const resp = await fetch(`https://api.openai.com/v1/assistants/${assistantId}`, {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const j = await resp.json();
+      return (
+        (j.instructions) ||
+        (j.metadata && (j.metadata.instructions || j.metadata.prompt)) ||
+        ""
+      ).toString();
+    } catch (e) {
+      console.log("Assistant fetch failed:", e?.message || e);
+      return "";
+    }
+  }
+
   // One-time greeting after instructions are in
   let greetingSent = false;
   function sendGreetingOnce() {
     if (greetingSent || !openaiReady || !openaiWs || openaiWs.readyState !== WebSocket.OPEN) return;
     greetingSent = true;
-    const greet = symParam
-      ? `Hello — you’re connected to ${symParam}. How can I help today?`
-      : "Hello — how can I help today?";
+    const greet = symParam && symParam.startsWith("asst_")
+      ? "Hello — you’re connected to our SmartFlows assistant. How can I help today?"
+      : (symParam ? `Hello — you’re connected to ${symParam}. How can I help today?`
+                  : "Hello — how can I help today?");
     openaiWs.send(JSON.stringify({
       type: "response.create",
       response: { modalities: ["audio", "text"], instructions: greet }
@@ -342,10 +366,18 @@ wss.on("connection", async (twilioWs) => {
         instParam = typeof cp.inst === "string" ? cp.inst : "";
         console.log("Received customParameters:", { sym: symParam || "", inst: instParam || "" });
 
-        // Fetch Sym instructions (non-blocking), then update session + greet
+        // Fetch instructions based on sym:
+        // - if sym looks like an OpenAI Assistant ID (asst_...), pull from OpenAI
+        // - otherwise, fall back to your SmartFlows Sym API (if configured)
         (async () => {
           let symExtra = "";
-          if (symParam) symExtra = await fetchSymInstructions(symParam);
+          if (symParam) {
+            if (symParam.startsWith("asst_")) {
+              symExtra = await fetchAssistantInstructions(symParam);
+            } else {
+              symExtra = await fetchSymInstructions(symParam);
+            }
+          }
           const merged = [instParam, symExtra].filter(Boolean).join(" ").trim();
           if (merged) instParam = merged;
           applySessionInstructions();
@@ -401,6 +433,5 @@ wss.on("connection", async (twilioWs) => {
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
-
 
 
