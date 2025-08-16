@@ -182,7 +182,7 @@ wss.on("connection", async (twilioWs) => {
             type: "server_vad",
             threshold: 0.5,
             prefix_padding_ms: 300,
-            silence_duration_ms: 200,
+            silence_duration_ms: 200,   // silence_duration_ms: 350, That gives you ~⅓ second of confirmed silence before the assistant speaks, which usually feels more human on the phone and reduces cut-offs.
             create_response: true,   // auto reply on end-of-speech
             interrupt_response: true // barge-in
           },
