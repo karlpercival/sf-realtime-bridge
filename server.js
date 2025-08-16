@@ -187,7 +187,7 @@ wss.on("connection", async (twilioWs) => {
             interrupt_response: true // barge-in
           },
           input_audio_format:  "g711_ulaw",                              // Twilio μ-law in
-          output_audio_format: { type: "pcm16", sample_rate_hz: 24000 }, // Hi-fi out
+output_audio_format: "pcm16",
           input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
         }
       }));
