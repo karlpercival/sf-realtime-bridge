@@ -136,7 +136,7 @@ wss.on("connection", async (twilioWs) => {
             create_response: true,  // let OpenAI trigger replies on end-of-speech
             interrupt_response: true
           },
-          input_audio_format:  "pcm16",
+input_audio_format:  "g711_ulaw",
           output_audio_format: "pcm16",
           input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
         }
@@ -265,16 +265,14 @@ wss.on("connection", async (twilioWs) => {
 
       case "media": {
         try {
-          const ulaw = b64ToU8(data.media?.payload || "");
-          if (ulaw.length !== 160) break; // 20ms @ 8kHz
+const ulaw = b64ToU8(data.media?.payload || "");
+if (ulaw.length !== 160) break;
 
-          // Feed OpenAI ONLY when it's ready and the assistant is NOT speaking
-          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN && !assistantSpeaking) {
-            const pcm8k  = muLawDecodeToPcm16(ulaw);
-            const pcm16k = upsample8kTo16k(pcm8k);
-            // Append audio; DO NOT commit – server VAD (create_response:true) will trigger replies
-            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: i16ToB64(pcm16k) }));
-          }
+if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+  // Forward Twilio μ-law directly (OpenAI session is set to g711_ulaw)
+  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload }));
+}
+
 
           // Echo caller UNTIL assistant starts talking
           if (!assistantSpeaking) queue.push(ulaw);
