@@ -1,9 +1,10 @@
 // server.js — Twilio <-> OpenAI Realtime (Node 20, ESM)
-// - Accepts Twilio WS subprotocol "audio"
-// - 1s beep on connect; echoes caller UNTIL assistant speaks
+// - Accept Twilio WS subprotocol "audio"
+// - 1s beep on connect; NO echo (prevents talk-over)
 // - British English only; alloy voice
-// - Server VAD handles turn-taking (create_response: true)
-// - We ONLY append audio (no manual commit / response.create except initial greeting)
+// - Server VAD handles turn-taking (create_response: true, interrupt_response: true)
+// - INPUT: Twilio μ-law (8 kHz) forwarded raw to OpenAI (g711_ulaw)
+// - OUTPUT: OpenAI PCM16 @ 24 kHz -> FIR low-pass -> decimate-by-3 to 8 kHz -> μ-law -> 20ms frames
 //
 // ENV: set OPENAI_API_KEY
 
@@ -22,21 +23,7 @@ const server = app.listen(process.env.PORT || 8080, () => {
   console.log("Bridge listening on", server.address().port);
 });
 
-// ---------- μ-law helpers ----------
-const MULAW_EXPAND = new Int16Array(256);
-(function () {
-  for (let i = 0; i < 256; i++) {
-    const mu = ~i & 0xff, sign = mu & 0x80, exp = (mu >> 4) & 0x07, man = mu & 0x0f;
-    let sample = ((man << 4) + 0x08) << (exp + 3);
-    sample -= 0x84; // bias 132
-    MULAW_EXPAND[i] = sign ? -sample : sample;
-  }
-})();
-function muLawDecodeToPcm16(u8) {
-  const out = new Int16Array(u8.length);
-  for (let i = 0; i < u8.length; i++) out[i] = MULAW_EXPAND[u8[i]];
-  return out;
-}
+// ---------- helpers ----------
 function pcm16ToMuLaw(int16) {
   const BIAS = 0x84, CLIP = 32635;
   const out = new Uint8Array(int16.length);
@@ -53,19 +40,7 @@ function pcm16ToMuLaw(int16) {
   }
   return out;
 }
-function upsample8kTo16k(pcm8k) {
-  const out = new Int16Array(pcm8k.length * 2);
-  for (let i = 0, j = 0; i < pcm8k.length; i++, j += 2) { out[j] = pcm8k[i]; out[j + 1] = pcm8k[i]; }
-  return out;
-}
-function downsampleIntFactor(int16, factor) {
-  const len = Math.floor(int16.length / factor);
-  const out = new Int16Array(len);
-  for (let i = 0, j = 0; j < len; i += factor, j++) out[j] = int16[i];
-  return out;
-}
 const b64ToU8 = (b64) => new Uint8Array(Buffer.from(b64, "base64"));
-const i16ToB64 = (i16) => Buffer.from(i16.buffer, i16.byteOffset, i16.byteLength).toString("base64");
 const u8ToB64  = (u8)  => Buffer.from(u8).toString("base64");
 
 // ---------- WS endpoint (accept Twilio subprotocol "audio") ----------
@@ -80,7 +55,7 @@ wss.on("connection", async (twilioWs) => {
 
   let streamSid = null;
 
-  // Outbound queue + 20 ms pacer (160 μ-law samples @ 8 kHz)
+  // Outbound queue + 20 ms pacer (160 μ-law bytes @ 8 kHz)
   const queue = [];
   const pacer = setInterval(() => {
     if (!streamSid || queue.length === 0 || twilioWs.readyState !== WebSocket.OPEN) return;
@@ -96,7 +71,7 @@ wss.on("connection", async (twilioWs) => {
   let openaiWs = null;
   let openaiReady = false;
 
-  // Echo control
+  // Talk-over control (no echo)
   let assistantSpeaking = false;
   let speakingResetTimer = null;
   const markAssistantSpeaking = () => {
@@ -114,13 +89,88 @@ wss.on("connection", async (twilioWs) => {
     if (speakingResetTimer) { clearTimeout(speakingResetTimer); speakingResetTimer = null; }
   };
 
+  // ----- Hi-fi 24k -> 8k audio path (FIR low-pass + decimate by 3) -----
+  function designLowpassFIR(taps, cutoffHz, srHz) {
+    // Windowed-sinc (Blackman)
+    const N = taps;
+    const fc = cutoffHz / srHz;
+    const a0 = 0.42, a1 = 0.5, a2 = 0.08;
+    const h = new Float32Array(N);
+    let sum = 0;
+    for (let n = 0; n < N; n++) {
+      const m = n - (N - 1) / 2;
+      const sinc = m === 0 ? 2 * Math.PI * fc : Math.sin(2 * Math.PI * fc * m) / m;
+      const w = a0 - a1 * Math.cos((2 * Math.PI * n) / (N - 1)) + a2 * Math.cos((4 * Math.PI * n) / (N - 1));
+      const v = w * sinc;
+      h[n] = v;
+      sum += v;
+    }
+    for (let n = 0; n < N; n++) h[n] /= sum || 1; // DC normalise
+    return h;
+  }
+
+  function makeDecimatorBy3_24kTo8k() {
+    const TAPS = 63;
+    const CUT_HZ = 3400;
+    const SR_IN = 24000;
+    const H = designLowpassFIR(TAPS, CUT_HZ, SR_IN);
+    let keep = new Float32Array(0); // carry over (TAPS-1 + <3) input samples
+
+    return function decimate(int16In) {
+      // int16 -> float32
+      const x = new Float32Array(keep.length + int16In.length);
+      if (keep.length) x.set(keep, 0);
+      for (let i = 0; i < int16In.length; i++) x[keep.length + i] = int16In[i];
+
+      const need = TAPS - 1;
+      const avail = x.length - need;
+      if (avail <= 0) { keep = x; return new Int16Array(0); }
+
+      const outCount = Math.floor(avail / 3);
+      const y = new Int16Array(outCount);
+      let pos = need;
+
+      for (let o = 0; o < outCount; o++, pos += 3) {
+        let acc = 0;
+        for (let k = 0; k < TAPS; k++) acc += H[k] * x[pos - k];
+        // clamp to int16
+        let s = Math.max(-32768, Math.min(32767, Math.round(acc)));
+        y[o] = s;
+      }
+
+      // keep last (TAPS-1 + remainder<3)
+      const consumed = outCount * 3;
+      const remain = avail - consumed; // 0..2
+      const keepLen = need + remain;
+      keep = x.subarray(x.length - keepLen);
+      return y;
+    };
+  }
+
+  // μ-law frame packer for Twilio (160 bytes = 20 ms @ 8 kHz)
+  let ulawRemainder = new Uint8Array(0);
+  function flushUlawFrames(ulawChunk) {
+    const combined = new Uint8Array(ulawRemainder.length + ulawChunk.length);
+    combined.set(ulawRemainder, 0);
+    combined.set(ulawChunk, ulawRemainder.length);
+    let off = 0;
+    while (off + 160 <= combined.length) {
+      queue.push(combined.subarray(off, off + 160));
+      off += 160;
+    }
+    ulawRemainder = combined.subarray(off);
+  }
+
+  // Build the decimator instance per call
+  const decimate24kTo8k = makeDecimatorBy3_24kTo8k();
+
   try {
     openaiWs = new WebSocket(OPENAI_WS_URL, {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
     openaiWs.on("open", () => {
-      // Apply session settings (English-only, server VAD handles replies)
+      // Session settings
       openaiWs.send(JSON.stringify({
         type: "session.update",
         session: {
@@ -133,11 +183,11 @@ wss.on("connection", async (twilioWs) => {
             threshold: 0.5,
             prefix_padding_ms: 300,
             silence_duration_ms: 200,
-            create_response: true,  // let OpenAI trigger replies on end-of-speech
-            interrupt_response: true
+            create_response: true,   // auto reply on end-of-speech
+            interrupt_response: true // barge-in
           },
-input_audio_format:  "g711_ulaw",
-          output_audio_format: "pcm16",
+          input_audio_format:  "g711_ulaw",                              // Twilio μ-law in
+          output_audio_format: { type: "pcm16", sample_rate_hz: 24000 }, // Hi-fi out
           input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
         }
       }));
@@ -167,41 +217,33 @@ input_audio_format:  "g711_ulaw",
 
       if (oaDebug < 30) { console.log("OpenAI event:", msg.type, JSON.stringify(msg).slice(0, 240)); oaDebug++; }
 
-      // Track reply lifecycle
-      if (msg.type === "response.created") {
-        // nothing extra; server VAD is in control
-      }
-
-      // Audio deltas (primary & fallbacks)
+      // Assistant audio (PCM16 @ 24k) -> resample to 8k -> μ-law -> 20ms frames
       if (msg.type === "response.output_audio.delta" && msg.delta) {
         markAssistantSpeaking();
         const raw = Buffer.from(msg.delta, "base64");
-        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-        const pcm8k = downsampleIntFactor(pcm, 3);
-        const ulaw = pcm16ToMuLaw(pcm8k);
-        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
+        const pcm8k = decimate24kTo8k(pcm);
+        if (pcm8k.length) flushUlawFrames(pcm16ToMuLaw(pcm8k));
         return;
       }
       if (msg.type === "response.audio.delta" && (msg.delta || msg.audio)) {
         markAssistantSpeaking();
         const raw = Buffer.from(msg.delta || msg.audio, "base64");
-        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-        const pcm8k = downsampleIntFactor(pcm, 3);
-        const ulaw = pcm16ToMuLaw(pcm8k);
-        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
+        const pcm8k = decimate24kTo8k(pcm);
+        if (pcm8k.length) flushUlawFrames(pcm16ToMuLaw(pcm8k));
         return;
       }
       if (msg.type === "output_audio.delta" && msg.audio) {
         markAssistantSpeaking();
         const raw = Buffer.from(msg.audio, "base64");
-        const pcm = new Int16Array(raw.buffer, raw.byteOffset, Math.floor(raw.byteLength / 2));
-        const pcm8k = downsampleIntFactor(pcm, 3);
-        const ulaw = pcm16ToMuLaw(pcm8k);
-        for (let i = 0; i + 160 <= ulaw.length; i += 160) queue.push(ulaw.subarray(i, i + 160));
+        const pcm = new Int16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2);
+        const pcm8k = decimate24kTo8k(pcm);
+        if (pcm8k.length) flushUlawFrames(pcm16ToMuLaw(pcm8k));
         return;
       }
 
-      // End-of-turn → allow echo again
+      // End-of-turn → allow talking again
       if (
         msg.type === "response.output_audio.done" ||
         msg.type === "response.done" ||
@@ -229,7 +271,7 @@ input_audio_format:  "g711_ulaw",
     console.error("OpenAI connect failed:", e?.message || e);
   }
 
-  // ---- Twilio -> (OpenAI + conditional echo) ----
+  // ---- Twilio -> (OpenAI) ----
   let debugCount = 0;
   twilioWs.on("message", (msg) => {
     const txt = msg.toString();
@@ -265,17 +307,17 @@ input_audio_format:  "g711_ulaw",
 
       case "media": {
         try {
-const ulaw = b64ToU8(data.media?.payload || "");
-if (ulaw.length !== 160) break;
+          const payload = data.media?.payload || "";
+          const ulaw = b64ToU8(payload);
+          if (ulaw.length !== 160) break; // 20ms @ 8kHz
 
-if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
-  // Forward Twilio μ-law directly (OpenAI session is set to g711_ulaw)
-  openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: data.media.payload }));
-}
+          // Always feed OpenAI (barge-in enabled at the model)
+          if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
+            // Forward Twilio μ-law directly (session expects g711_ulaw)
+            openaiWs.send(JSON.stringify({ type: "input_audio_buffer.append", audio: payload }));
+          }
 
-
-
-
+          // NO ECHO — prevents talk-over & VAD confusion
         } catch (e) {
           console.error("Media forward error:", e?.message || e);
         }
@@ -299,3 +341,4 @@ if (openaiReady && openaiWs && openaiWs.readyState === WebSocket.OPEN) {
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
+
