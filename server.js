@@ -129,6 +129,35 @@ wss.on("connection", async (twilioWs) => {
 
   let streamSid = null;
 
+    // ⬇️ ADD THIS BLOCK RIGHT HERE
+  let pmpt = null;
+  let inst = "";
+  let firstStartHandled = false;
+
+  twilioWs.on("message", (buf) => {
+    try {
+      const evt = JSON.parse(buf.toString());
+
+      if (!firstStartHandled && evt.event === "start" && evt.start) {
+        firstStartHandled = true;
+        streamSid = evt.start.streamSid || streamSid;
+
+        const params = evt.start.customParameters || {};
+        pmpt = params.pmpt || null;
+        inst = params.inst || "";
+
+        console.log("Twilio customParameters:", params);
+        // Expect: { pmpt: 'pmpt_68a0…a30b8', inst: 'You are Amy…' }
+      }
+
+      // keep your existing handlers here (media/mark/stop/etc.)
+
+    } catch (e) {
+      console.error("Non-JSON frame from Twilio:", e);
+    }
+  });
+  // ⬆️ END OF INSERT
+
   // Outbound queue + 20 ms pacer (160 μ-law bytes @ 8 kHz)
   const queue = [];
   const pacer = setInterval(() => {
