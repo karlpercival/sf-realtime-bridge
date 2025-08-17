@@ -14,15 +14,8 @@ import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
 
 // ---- Env ----
-// ---- Env ----
-const OPENAI_API_KEY   = process.env.OPENAI_API_KEY;
-const OPENAI_PROMPT_ID = process.env.OPENAI_PROMPT_ID || "";  // <-- new line
-
-if (!OPENAI_API_KEY) {
-  console.error("Missing OPENAI_API_KEY");
-  process.exit(1);
-}
-
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) { console.error("Missing OPENAI_API_KEY"); process.exit(1); }
 const SYM_API_URL = process.env.SYM_API_URL || "";
 const SYM_API_KEY = process.env.SYM_API_KEY || "";
 
@@ -35,7 +28,6 @@ const server = app.listen(process.env.PORT || 8080, () => {
   const addr = server.address();
   console.log("Bridge listening on", typeof addr === "object" ? addr.port : addr);
 });
-
 
 // ---------- basic helpers ----------
 function pcm16ToMuLaw(int16) {
@@ -266,44 +258,30 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-openaiWs.on("open", () => {
-  // Initial session config; instructions refined once we know sym/inst
-  const sessionPayload = {
-    instructions: baseInstructions,
-    voice: "alloy",
-    modalities: ["audio", "text"],
-    turn_detection: {
-      type: "server_vad",
-      threshold: 0.5,
-      prefix_padding_ms: 300,
-      silence_duration_ms: 200,
-      create_response: true,   // auto reply at end of caller speech
-      interrupt_response: true // barge-in
-    },
-    input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
-    output_audio_format: "pcm16",     // 24 kHz PCM out (default)
-    input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
-  };
-
-  if (OPENAI_PROMPT_ID) {
-    sessionPayload.prompt = { id: OPENAI_PROMPT_ID };
-  }
-
-  openaiWs.send(JSON.stringify({
-    type: "session.update",
-    session: sessionPayload
-  }));
-
-  console.log("OpenAI connected (sent session.update)");
-  openaiReady = true;
-});
-
-
-  console.log("OpenAI connected (sent session.update)");
-  openaiReady = true;
-});
-
-
+    openaiWs.on("open", () => {
+      // Initial session config; instructions refined once we know sym/inst
+      openaiWs.send(JSON.stringify({
+        type: "session.update",
+        session: {
+          instructions: baseInstructions,
+          voice: "alloy",
+          modalities: ["audio", "text"],
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 200,
+            create_response: true,   // auto reply at end of caller speech
+            interrupt_response: true // barge-in
+          },
+          input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
+          output_audio_format: "pcm16",     // 24 kHz PCM out (default)
+          input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
+        }
+      }));
+      console.log("OpenAI connected (sent session.update)");
+      openaiReady = true;
+    });
 
     openaiWs.on("message", (buf) => {
       const txt = buf.toString();
@@ -455,6 +433,7 @@ openaiWs.on("open", () => {
 
   twilioWs.on("error", (e) => console.error("Twilio WS error:", e?.message || e));
 }); // final line — no extra closers below
+
 
 
 
