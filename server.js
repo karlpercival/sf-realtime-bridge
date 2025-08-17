@@ -260,31 +260,38 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-    openaiWs.on("open", () => {
+openaiWs.on("open", () => {
   // Initial session config; instructions refined once we know sym/inst
+  const sessionPayload = {
+    instructions: baseInstructions,
+    voice: "alloy",
+    modalities: ["audio", "text"],
+    turn_detection: {
+      type: "server_vad",
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 200,
+      create_response: true,   // auto reply at end of caller speech
+      interrupt_response: true // barge-in
+    },
+    input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
+    output_audio_format: "pcm16",     // 24 kHz PCM out (default)
+    input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
+  };
+
+  if (OPENAI_PROMPT_ID) {
+    sessionPayload.prompt = { id: OPENAI_PROMPT_ID };
+  }
+
   openaiWs.send(JSON.stringify({
     type: "session.update",
-    session: {
-      instructions: baseInstructions,
-      voice: "alloy",
-      modalities: ["audio", "text"],
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 200,
-        create_response: true,   // auto reply at end of caller speech
-        interrupt_response: true // barge-in
-      },
-      input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
-      output_audio_format: "pcm16",     // 24 kHz PCM out (default)
-      input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" },
-      prompt: { id: OPENAI_PROMPT_ID }  // 👈 new line
-    }
+    session: sessionPayload
   }));
+
   console.log("OpenAI connected (sent session.update)");
   openaiReady = true;
 });
+
 
 
     openaiWs.on("message", (buf) => {
