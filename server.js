@@ -287,30 +287,51 @@ wss.on("connection", async (twilioWs) => {
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "OpenAI-Beta": "realtime=v1" }
     });
 
-    openaiWs.on("open", () => {
-      // Initial session config; instructions refined once we know sym/inst
-      openaiWs.send(JSON.stringify({
-        type: "session.update",
-        session: {
-          instructions: baseInstructions,
-          voice: "alloy",
-          modalities: ["audio", "text"],
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 200,
-            create_response: true,   // auto reply at end of caller speech
-            interrupt_response: true // barge-in
-          },
-          input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
-          output_audio_format: "pcm16",     // 24 kHz PCM out (default)
-          input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
-        }
-      }));
-      console.log("OpenAI connected (sent session.update)");
-      openaiReady = true;
-    });
+openaiWs.on("open", () => {
+  // Build persona from pmpt + inst (fallback to baseInstructions)
+  const PMPT_MAP = {
+    // Amy
+    "pmpt_68a0a37d503c81909c9c78c7d33dfccd06a96dd0c29a30b8": `You are Amy, a warm, concise British PA for SmartFlows. Always speak British English. Greet once, then listen. Keep replies to 1–2 short sentences. Ask one helpful question when appropriate. Never talk over the caller, and pause if they’re speaking. First line: “This is Amy. How can I help today?”`
+  };
+
+  let persona = baseInstructions;
+  if (typeof pmpt === "string" && PMPT_MAP[pmpt]) {
+    persona = PMPT_MAP[pmpt];
+    if (inst && String(inst).trim()) {
+      persona += `\n\nCALL-SPECIFIC:\n${inst}`;
+    }
+  } else if (inst && String(inst).trim()) {
+    persona = `${baseInstructions}\n\nCALL-SPECIFIC:\n${inst}`;
+  }
+
+  // Initial session config (now uses persona)
+  openaiWs.send(JSON.stringify({
+    type: "session.update",
+    session: {
+      instructions: persona,
+      voice: "alloy",
+      modalities: ["audio", "text"],
+      turn_detection: {
+        type: "server_vad",
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 200,
+        create_response: true,
+        interrupt_response: true
+      },
+      input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
+      output_audio_format: "pcm16",     // 24 kHz PCM out
+      input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
+    }
+  }));
+  console.log(
+    "OpenAI connected (sent session.update) with persona:",
+    PMPT_MAP[pmpt] ? "Amy (pmpt)" : "baseInstructions",
+    "| inst added?", !!(inst && String(inst).trim())
+  );
+  openaiReady = true;
+});
+
 
     openaiWs.on("message", (buf) => {
       const txt = buf.toString();
