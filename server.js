@@ -304,7 +304,10 @@ openaiWs.on("open", () => {
     persona = `${baseInstructions}\n\nCALL-SPECIFIC:\n${inst}`;
   }
 
-  // Initial session config (now uses persona)
+  // HARD stop: reply once, then wait for the caller to speak again
+  persona += "\n\nHARD RULE: After you finish one short reply, stay silent until you hear the caller speak again. Do not ask another question until you detect new caller speech.";
+
+  // Initial session config (now uses persona + stricter VAD to prevent over-talking)
   openaiWs.send(JSON.stringify({
     type: "session.update",
     session: {
@@ -313,17 +316,18 @@ openaiWs.on("open", () => {
       modalities: ["audio", "text"],
       turn_detection: {
         type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 200,
-        create_response: true,
-        interrupt_response: true
+        threshold: 0.85,          // require stronger confidence before ending your turn
+        prefix_padding_ms: 200,
+        silence_duration_ms: 800, // wait longer before deciding the caller stopped
+        create_response: true,    // auto-respond after caller speech ends
+        interrupt_response: true  // allow caller to barge-in
       },
       input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
       output_audio_format: "pcm16",     // 24 kHz PCM out
       input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
     }
   }));
+
   console.log(
     "OpenAI connected (sent session.update) with persona:",
     PMPT_MAP[pmpt] ? "Amy (pmpt)" : "baseInstructions",
