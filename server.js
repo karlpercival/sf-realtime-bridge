@@ -293,6 +293,11 @@ openaiWs.on("open", () => {
 });
 
 
+  console.log("OpenAI connected (sent session.update)");
+  openaiReady = true;
+});
+
+
 
     openaiWs.on("message", (buf) => {
       const txt = buf.toString();
