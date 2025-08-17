@@ -14,10 +14,15 @@ import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
 
 // ---- Env ----
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_PROMPT_ID = process.env.OPENAI_PROMPT_ID || "";
+// ---- Env ----
+const OPENAI_API_KEY   = process.env.OPENAI_API_KEY;
+const OPENAI_PROMPT_ID = process.env.OPENAI_PROMPT_ID || "";  // <-- new line
 
-if (!OPENAI_API_KEY) { console.error("Missing OPENAI_API_KEY"); process.exit(1); }
+if (!OPENAI_API_KEY) {
+  console.error("Missing OPENAI_API_KEY");
+  process.exit(1);
+}
+
 const SYM_API_URL = process.env.SYM_API_URL || "";
 const SYM_API_KEY = process.env.SYM_API_KEY || "";
 
@@ -30,6 +35,7 @@ const server = app.listen(process.env.PORT || 8080, () => {
   const addr = server.address();
   console.log("Bridge listening on", typeof addr === "object" ? addr.port : addr);
 });
+
 
 // ---------- basic helpers ----------
 function pcm16ToMuLaw(int16) {
