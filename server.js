@@ -12,6 +12,8 @@
 
 import express from "express";
 import WebSocket, { WebSocketServer } from "ws";
+import { TOOL_DEFS } from "./functions/index.js";
+import { runTool } from "./functions/index.js";
 
 // ---- Env ----
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -20,6 +22,9 @@ const SYM_API_URL = process.env.SYM_API_URL || "";
 const SYM_API_KEY = process.env.SYM_API_KEY || "";
 
 const OPENAI_WS_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+
+// Buffers tool-call args streamed by the model (keep this at top level, not inside any function)
+const toolBuffers = new Map(); // tool_call_id -> { name, args: "" }
 
 // ---------- tiny HTTP (health) ----------
 const app = express();
@@ -308,25 +313,30 @@ openaiWs.on("open", () => {
   persona += "\n\nHARD RULE: After you finish one short reply, stay silent until you hear the caller speak again. Do not ask another question until you detect new caller speech.";
 
   // Initial session config (now uses persona + stricter VAD to prevent over-talking)
-  openaiWs.send(JSON.stringify({
-    type: "session.update",
-    session: {
-      instructions: persona,
-      voice: "alloy",
-      modalities: ["audio", "text"],
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.85,          // require stronger confidence before ending your turn
-        prefix_padding_ms: 200,
-        silence_duration_ms: 800, // wait longer before deciding the caller stopped
-        create_response: true,    // auto-respond after caller speech ends
-        interrupt_response: true  // allow caller to barge-in
-      },
-      input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
-      output_audio_format: "pcm16",     // 24 kHz PCM out
-      input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" }
-    }
-  }));
+openaiWs.send(JSON.stringify({
+  type: "session.update",
+  session: {
+    instructions: persona,
+    voice: "alloy",
+    modalities: ["audio", "text"],
+    turn_detection: {
+      type: "server_vad",
+      threshold: 0.85,          // require stronger confidence before ending your turn
+      prefix_padding_ms: 200,
+      silence_duration_ms: 800, // wait longer before deciding the caller stopped
+      create_response: true,    // auto-respond after caller speech ends
+      interrupt_response: true  // allow caller to barge-in
+    },
+    input_audio_format:  "g711_ulaw", // Twilio μ-law in (8 kHz)
+    output_audio_format: "pcm16",     // 24 kHz PCM out
+    input_audio_transcription: { model: "gpt-4o-transcribe", language: "en" },
+
+    // ↓ Register external tools
+    tools: TOOL_DEFS,
+    tool_choice: "auto"
+  }
+}));
+
 
   console.log(
     "OpenAI connected (sent session.update) with persona:",
@@ -337,10 +347,60 @@ openaiWs.on("open", () => {
 });
 
 
-    openaiWs.on("message", (buf) => {
-      const txt = buf.toString();
-      let msg;
-      try { msg = JSON.parse(txt); } catch { /* non-JSON frames */ return; }
+openaiWs.on("message", (buf) => {
+  const txt = buf.toString();
+  let msg;
+  try { msg = JSON.parse(txt); } catch { /* non-JSON frames */ return; }
+
+  // NEW: collect streaming tool-call arguments from the model
+  if (msg?.type === "response.function_call_arguments.delta") {
+    const { tool_call_id, name, delta } = msg;
+    const buf2 = toolBuffers.get(tool_call_id) || { name, args: "" };
+    if (name) buf2.name = name;     // name may appear only in the first chunk
+    if (delta) buf2.args += delta;  // accumulate streamed JSON
+    toolBuffers.set(tool_call_id, buf2);
+    return;                         // nothing else to do for this frame
+  }
+
+  // NEW: when tool-call arguments are complete, run the tool and return result
+  if (msg?.type === "response.function_call_arguments.done") {
+    const { tool_call_id } = msg;
+    const buf2 = toolBuffers.get(tool_call_id);
+    if (!buf2) return;
+
+    toolBuffers.delete(tool_call_id);
+
+    let parsedArgs = {};
+    try {
+      parsedArgs = buf2.args ? JSON.parse(buf2.args) : {};
+    } catch (e) {
+      parsedArgs = { _parse_error: String(e), _raw: buf2.args };
+    }
+
+    // run tool without making the handler async
+    (async () => {
+      try {
+        const result = await runTool(buf2.name, parsedArgs);
+        openaiWs.send(JSON.stringify({
+          type: "tool.result",
+          tool_call_id,
+          result
+        }));
+      } catch (e) {
+        openaiWs.send(JSON.stringify({
+          type: "tool.result",
+          tool_call_id,
+          result: { error: String(e) }
+        }));
+      }
+    })();
+
+    return;
+  }
+
+  // …keep your other message cases below …
+});
+
 
       // Assistant audio (PCM16 @ 24k) -> resample to 8k -> μ-law -> 20ms frames
       if (msg.type === "response.output_audio.delta" && msg.delta) {
