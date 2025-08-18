@@ -347,22 +347,23 @@ openaiWs.send(JSON.stringify({
 });
 
 
-openaiWs.on("message", (buf) => {
+// Single, flat OpenAI message handler (no nesting, tool-calls supported)
+openaiWs.on("message", async (buf) => {
   const txt = buf.toString();
   let msg;
   try { msg = JSON.parse(txt); } catch { /* non-JSON frames */ return; }
 
-  // NEW: collect streaming tool-call arguments from the model
+  // --- collect streaming tool-call arguments ---
   if (msg?.type === "response.function_call_arguments.delta") {
     const { tool_call_id, name, delta } = msg;
     const buf2 = toolBuffers.get(tool_call_id) || { name, args: "" };
-    if (name) buf2.name = name;     // name may appear only in the first chunk
-    if (delta) buf2.args += delta;  // accumulate streamed JSON
+    if (name) buf2.name = name;           // may appear only in the first chunk
+    if (delta) buf2.args += delta;        // accumulate streamed JSON
     toolBuffers.set(tool_call_id, buf2);
-    return;                         // nothing else to do for this frame
+    return;                               // handled
   }
 
-  // NEW: when tool-call arguments are complete, run the tool and return result
+  // --- when tool-call args complete, run the tool and return the result ---
   if (msg?.type === "response.function_call_arguments.done") {
     const { tool_call_id } = msg;
     const buf2 = toolBuffers.get(tool_call_id);
@@ -377,29 +378,29 @@ openaiWs.on("message", (buf) => {
       parsedArgs = { _parse_error: String(e), _raw: buf2.args };
     }
 
-    // run tool without making the handler async
-    (async () => {
-      try {
-        const result = await runTool(buf2.name, parsedArgs);
-        openaiWs.send(JSON.stringify({
-          type: "tool.result",
-          tool_call_id,
-          result
-        }));
-      } catch (e) {
-        openaiWs.send(JSON.stringify({
-          type: "tool.result",
-          tool_call_id,
-          result: { error: String(e) }
-        }));
-      }
-    })();
-
-    return;
+    try {
+      const result = await runTool(buf2.name, parsedArgs);
+      openaiWs.send(JSON.stringify({
+        type: "tool.result",
+        tool_call_id,
+        result
+      }));
+    } catch (e) {
+      openaiWs.send(JSON.stringify({
+        type: "tool.result",
+        tool_call_id,
+        result: { error: String(e) }
+      }));
+    }
+    return; // handled
   }
 
-  // …keep your other message cases below …
+  // --- keep your existing message cases below here ---
+  // e.g. if (msg.type === "response.created") { … }
+  //      if (msg.type === "input_audio_buffer.committed") { … }
+  //      etc.
 });
+
 
 
       // Assistant audio (PCM16 @ 24k) -> resample to 8k -> μ-law -> 20ms frames
