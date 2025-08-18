@@ -333,7 +333,7 @@ openaiWs.send(JSON.stringify({
 
     // ↓ Register external tools
     tools: TOOL_DEFS,
-    tool_choice: "auto"
+    tool_choice: "none"
   }
 }));
 
