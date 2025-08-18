@@ -1,4 +1,4 @@
-server.js — Twilio <-> OpenAI Realtime (Node 20, ESM)
+// server.js — Twilio <-> OpenAI Realtime (Node 20, ESM)
 // - Accepts Twilio WS subprotocol "audio"
 // - 1s beep on connect; NO echo
 // - British English; server VAD (create_response: true, interrupt_response: true)
